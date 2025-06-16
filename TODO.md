@@ -1,4 +1,6 @@
 # Issues
-- enumerate tiles folder
+- enumerate tiles folder. 
+Here's the tiles element: 
+
 
 # Enhancements
