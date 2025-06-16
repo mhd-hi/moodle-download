@@ -1,0 +1,31 @@
+{
+    "manifest_version": 3,
+    "name": "Moodle Downloader",
+    "version": "1.0.0",
+    "description": "Automatically download course materials from Moodle",
+    "permissions": [
+        "downloads",
+        "activeTab"
+    ],
+    "host_permissions": [
+        "https://ena.etsmtl.ca/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://ena.etsmtl.ca/*"
+            ],
+            "js": [
+                "contentScript.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "action": {
+        "default_title": "Moodle Downloader",
+        "default_popup": "popup.html"
+    }
+}
