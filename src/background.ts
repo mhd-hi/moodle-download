@@ -286,15 +286,13 @@ class MoodleBackgroundService {
      * @returns Generated ZIP filename
      */
     private generateZipFilename(layout: 'standard' | 'tiles', courseName?: string): string {
-        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
-
         if (courseName) {
             // Use course name if available
-            return `${courseName}_${timestamp}.zip`;
+            return `${courseName}.zip`;
         } else {
             // Fallback to old naming scheme
             const layoutPrefix = layout === 'tiles' ? 'tiles' : 'standard';
-            return `moodle_files_${layoutPrefix}_${timestamp}.zip`;
+            return `moodle_files_${layoutPrefix}.zip`;
         }
     }    /**
      * Check if a filename has a valid file extension
@@ -478,7 +476,7 @@ class MoodleBackgroundService {
         const lastSlashIndex = originalPath.lastIndexOf('/');
         const directory = lastSlashIndex >= 0 ? originalPath.substring(0, lastSlashIndex + 1) : '';
         const filename = lastSlashIndex >= 0 ? originalPath.substring(lastSlashIndex + 1) : originalPath;
-        
+
         const lastDotIndex = filename.lastIndexOf('.');
         const nameWithoutExt = lastDotIndex >= 0 ? filename.substring(0, lastDotIndex) : filename;
         const extension = lastDotIndex >= 0 ? filename.substring(lastDotIndex) : '';

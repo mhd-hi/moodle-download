@@ -3,6 +3,11 @@
     "name": "Moodle Downloader",
     "version": "1.0.0",
     "description": "Automatically download course materials from Moodle",
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png"
+    },
     "permissions": [
         "downloads",
         "activeTab"
@@ -26,6 +31,11 @@
     ],
     "action": {
         "default_title": "Moodle Downloader",
-        "default_popup": "popup.html"
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "icons/icon16.png",
+            "48": "icons/icon48.png",
+            "128": "icons/icon128.png"
+        }
     }
 }
