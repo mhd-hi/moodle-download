@@ -363,7 +363,6 @@ class MoodleBackgroundService {
         const extension = parts[parts.length - 1];
         return extension || '';
     }
-
     /**
      * Sanitize folder name for ZIP structure
      * @param folderName Original folder name
@@ -372,7 +371,6 @@ class MoodleBackgroundService {
     private sanitizeFolderName(folderName: string): string {
         return folderName
             .replace(/[<>:"/\\|?*]/g, '_')
-            .replace(/\s+/g, '_')
             .trim();
     }
 
