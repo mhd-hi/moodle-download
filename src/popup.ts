@@ -101,7 +101,7 @@ class MoodlePopup {
 
         } catch (error) {
             Logger.error('Error scanning tab:', error);
-            this.showError('Failed to scan page. Make sure you\'re on a Moodle course page.');
+            this.showError('Failed to scan page. Make sure you\'re on a Moodle course page. Please refresh the page.');
         }
     }
 
@@ -330,21 +330,17 @@ class MoodlePopup {
                 this.downloadTextEl.textContent = 'Download as ZIP';
             }, 3000);
         }
-    }
-
-    /**
+    }    /**
      * Generate filename for a file
      */
     private generateFilename(file: DiscoveredFile): string {
-        let filename = file.originalFilename || `${file.title}.html`;
+        // Use the original filename from instancename (already processed in utils.ts)
+        let filename = file.originalFilename || file.title;
 
-        // Ensure filename has an extension
-        if (!filename.includes('.')) {
-            filename += '.html';
-        }
+        // Don't add extension here - let the background script handle it based on actual content
+        // The background script will determine the proper extension from content-type headers
 
-        // Sanitize filename
-        return filename.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_').trim();
+        return filename;
     }
 
     /**

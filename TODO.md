@@ -1,7 +1,12 @@
 # Issues
-- 
+- Fix folder downloading as html
+ - If no solution found, make this error and link the page to manually download in popup.html.
 
 # Enhancements
+- Add folder support (when /mod/folder/)
+We need to use this:
+https://ena.etsmtl.ca/mod/folder/download_folder.php?id=1484056 (The id here is the id)
+This is a filetype=zip.  
 - Add logs inside the extension UI.
     - It should show the logs that we're doing i nthe UI. Limit it to 5 lines. It should be scrollable. It should appear after the files-container. So it will receive data and synchronize on the spot.
 - If file is too large, add that error in the UI 

@@ -61,14 +61,76 @@ class MoodleContentScript {
       if (DOMUtils.isTilesLayout()) {
         Logger.info('Detected tiles layout');
         layout = 'tiles';
-        const sections = DOMUtils.findTileSections(); sections.forEach(section => {
+
+        // First try the standard approach - looking in section elements
+        const sections = DOMUtils.findTileSections();
+        Logger.info(`Found ${sections.length} sections with activities from section elements`); sections.forEach(section => {
+          Logger.info(`Section "${section.title}" has ${section.activities.length} activities`);
           section.activities.forEach(activity => {
             if (URLUtils.isValidMoodleURL(activity.url)) {
               const file = this.createDiscoveredFile(activity, section.title);
               files.push(file);
             }
           });
-        });
+        });        // If no files found in sections, try alternative approaches
+        if (files.length === 0) {
+          Logger.info('No files found in section elements, trying dynamic loading...');
+
+          // Try to load tile content dynamically
+          const dynamicSections = await DOMUtils.loadTileSectionsContent();
+          Logger.info(`Found ${dynamicSections.length} sections with dynamic content`);
+
+          dynamicSections.forEach(section => {
+            section.activities.forEach(activity => {
+              if (URLUtils.isValidMoodleURL(activity.url)) {
+                const file = this.createDiscoveredFile(activity, section.title);
+                files.push(file);
+              }
+            });
+          });
+
+          // If still no files after dynamic loading, try fallback approaches
+          if (files.length === 0) {
+            Logger.info('No files found after dynamic loading, trying fallback approaches...');
+
+            // Try looking for any downloadable links throughout the page
+            const allActivities = DOMUtils.findAllActivityLinks();
+            Logger.info(`Found ${allActivities.length} total activity links on page`);
+
+            allActivities.forEach(activity => {
+              if (URLUtils.isValidMoodleURL(activity.url)) {
+                const file = this.createDiscoveredFile(activity);
+                files.push(file);
+              }
+            });
+
+            // If still no files, try scanning the entire tiles container
+            if (files.length === 0) {
+              Logger.info('Still no files found, scanning entire tiles container...');
+              const tilesFiles = DOMUtils.findFilesInTilesContainer();
+              Logger.info(`Found ${tilesFiles.length} files in tiles container`);
+
+              tilesFiles.forEach(activity => {
+                if (URLUtils.isValidMoodleURL(activity.url)) {
+                  const file = this.createDiscoveredFile(activity);
+                  files.push(file);
+                }
+              });
+            }
+
+            // Try one more approach - look for loaded section content anywhere
+            if (files.length === 0) {
+              Logger.info('Trying to find loaded section content anywhere in DOM...');
+              const loadedContent = DOMUtils.findLoadedSectionContent();
+              Logger.info(`Found ${loadedContent.length} files in loaded section content`);
+
+              loadedContent.forEach(activity => {
+                const file = this.createDiscoveredFile(activity);
+                files.push(file);
+              });
+            }
+          }
+        }
       } else {
         Logger.info('Detected standard layout');
         layout = 'standard';

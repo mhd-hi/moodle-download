@@ -187,33 +187,48 @@ class MoodleBackgroundService {
             if (!response.ok) {
                 throw new Error(`Failed to fetch ${file.title}: ${response.status} ${response.statusText}`);
             }
-
             // Get actual filename from response headers if available
-            let actualFilename = file.filename;
-            const contentDisposition = response.headers.get('content-disposition');
-            if (contentDisposition) {
+            let actualFilename = file.filename; // Start with our preferred filename
+            const contentDisposition = response.headers.get('content-disposition');            // Only use server filename if our filename doesn't have a valid extension
+            if (!this.hasValidExtension(actualFilename) && contentDisposition) {
                 const matches = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
                 if (matches && matches[1]) {
-                    actualFilename = matches[1].replace(/['"]/g, '');
-                    actualFilename = decodeURIComponent(actualFilename);
+                    const serverFilename = matches[1].replace(/['"]/g, '');
+                    const decodedServerFilename = decodeURIComponent(serverFilename);
+
+                    // Extract just the extension from server filename if it has one
+                    if (this.hasValidExtension(decodedServerFilename)) {
+                        const serverExt = this.getFileExtension(decodedServerFilename);
+                        actualFilename = `${actualFilename}.${serverExt}`;
+                    }
                 }
             }
 
-            // If still no proper filename, try to get it from URL or content type
-            if (actualFilename === 'view.php' || !actualFilename.includes('.')) {
+            // If still no proper filename, try to get extension from content type or URL
+            if (!this.hasValidExtension(actualFilename)) {
                 const contentType = response.headers.get('content-type');
                 const urlPath = new URL(response.url).pathname;
                 const urlFilename = urlPath.split('/').pop();
 
-                if (urlFilename && urlFilename.includes('.') && urlFilename !== 'view.php') {
-                    actualFilename = decodeURIComponent(urlFilename);
+                Logger.info(`Determining extension for ${file.title}: contentType=${contentType}, urlFilename=${urlFilename}`);                // Try to get extension from URL first
+                if (urlFilename && this.hasValidExtension(urlFilename) && urlFilename !== 'view.php') {
+                    const urlExt = this.getFileExtension(urlFilename);
+                    actualFilename = `${actualFilename}.${urlExt}`;
+                    Logger.info(`Using URL extension: ${urlExt}`);
                 } else if (contentType) {
+                    // Get extension from content type
                     const ext = this.getExtensionFromContentType(contentType);
-                    actualFilename = `${file.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
+                    actualFilename = `${actualFilename}.${ext}`;
+                    Logger.info(`Using content-type extension: ${ext} (from ${contentType})`);
                 } else {
-                    actualFilename = `${file.title.replace(/[<>:"/\\|?*]/g, '_')}.pdf`; // Default to PDF for course materials
+                    // For Moodle course materials, PDF is the most common format
+                    actualFilename = `${actualFilename}.pdf`;
+                    Logger.info(`Using default PDF extension`);
                 }
             }
+
+            // Sanitize the filename to ensure it's safe for file systems and ZIP files
+            actualFilename = this.sanitizeFilename(actualFilename);
 
             // Check file size to prevent memory issues (600MB limit)
             const contentLength = response.headers.get('content-length'); if (contentLength && parseInt(contentLength) > MAX_FILE_SIZE_LIMIT) {
@@ -275,6 +290,56 @@ class MoodleBackgroundService {
             const layoutPrefix = layout === 'tiles' ? 'tiles' : 'standard';
             return `moodle_files_${layoutPrefix}_${timestamp}.zip`;
         }
+    }    /**
+     * Check if a filename has a valid file extension
+     * @param filename The filename to check
+     * @returns True if the filename has a valid extension
+     */
+    private hasValidExtension(filename: string): boolean {
+        if (!filename.includes('.')) {
+            return false;
+        }
+
+        const parts = filename.split('.');
+        if (parts.length < 2) {
+            return false;
+        }
+
+        const extension = parts[parts.length - 1];
+        if (!extension) {
+            return false;
+        }
+
+        const lowerExt = extension.toLowerCase();
+
+        // Valid file extensions should be 1-5 characters and contain only letters/numbers
+        const isValidFormat = /^[a-z0-9]{1,5}$/i.test(lowerExt);
+
+        // Common file extensions that we recognize
+        const commonExtensions = [
+            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+            'txt', 'html', 'htm', 'css', 'js', 'json', 'xml',
+            'jpg', 'jpeg', 'png', 'gif', 'svg', 'bmp',
+            'mp3', 'mp4', 'avi', 'wav', 'mov',
+            'zip', 'rar', '7z', 'tar', 'gz',
+            'exe', 'msi', 'dmg', 'deb', 'rpm'
+        ];
+
+        return isValidFormat && commonExtensions.includes(lowerExt);
+    }
+
+    /**
+     * Extract the file extension from a filename
+     * @param filename The filename
+     * @returns The file extension (without the dot)
+     */
+    private getFileExtension(filename: string): string {
+        if (!filename.includes('.')) {
+            return '';
+        }
+        const parts = filename.split('.');
+        const extension = parts[parts.length - 1];
+        return extension || '';
     }
 
     /**
@@ -290,6 +355,46 @@ class MoodleBackgroundService {
     }
 
     /**
+     * Sanitize filename for safe use in file systems and ZIP files
+     * @param filename Original filename
+     * @returns Sanitized filename
+     */
+    private sanitizeFilename(filename: string): string {
+        // Replace invalid characters with underscores
+        // Invalid characters: < > : " / \ | ? * and control characters
+        let sanitized = filename
+            .replace(/[<>:"/\\|?*\x00-\x1f\x7f]/g, '_')
+            .replace(/\s+/g, ' ') // Normalize spaces but keep them (unlike folder names)
+            .trim();
+
+        // Handle reserved filenames on Windows
+        const reservedNames = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+        if (reservedNames.test(sanitized)) {
+            sanitized = `_${sanitized}`;
+        }
+
+        // Ensure filename is not empty and doesn't start/end with dots or spaces
+        if (!sanitized || sanitized === '.' || sanitized === '..') {
+            sanitized = 'file';
+        }
+
+        // Remove leading/trailing dots and spaces
+        sanitized = sanitized.replace(/^[.\s]+|[.\s]+$/g, '');
+
+        // Ensure we still have content after cleaning
+        if (!sanitized) {
+            sanitized = 'file';
+        }
+
+        // Limit filename length (most file systems support 255 chars, but let's be conservative)
+        if (sanitized.length > 200) {
+            const ext = sanitized.includes('.') ? '.' + sanitized.split('.').pop() : '';
+            const nameWithoutExt = sanitized.substring(0, sanitized.lastIndexOf('.')) || sanitized;
+            sanitized = nameWithoutExt.substring(0, 200 - ext.length) + ext;
+        }
+
+        return sanitized;
+    }    /**
      * Get file extension from content type
      * @param contentType The content type header
      * @returns File extension
@@ -305,15 +410,36 @@ class MoodleBackgroundService {
             'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
             'text/plain': 'txt',
             'text/html': 'html',
+            'text/css': 'css',
+            'text/javascript': 'js',
+            'application/javascript': 'js',
+            'application/json': 'json',
             'image/jpeg': 'jpg',
+            'image/jpg': 'jpg',
             'image/png': 'png',
             'image/gif': 'gif',
+            'image/svg+xml': 'svg',
             'application/zip': 'zip',
-            'application/x-zip-compressed': 'zip'
+            'application/x-zip-compressed': 'zip',
+            'application/x-rar-compressed': 'rar',
+            'application/x-7z-compressed': '7z',
+            'video/mp4': 'mp4',
+            'video/avi': 'avi',
+            'audio/mpeg': 'mp3',
+            'audio/wav': 'wav'
         };
 
         const mainType = contentType?.split(';')[0]?.trim().toLowerCase() || '';
-        return typeMap[mainType] || 'bin';
+        const extension = typeMap[mainType];
+
+        if (extension) {
+            Logger.info(`Mapped content-type '${mainType}' to extension '${extension}'`);
+            return extension;
+        } else {
+            // For unknown content types in an academic context, PDF is most likely
+            Logger.info(`Unknown content-type '${mainType}', defaulting to PDF`);
+            return 'pdf';
+        }
     }
 
     /**
