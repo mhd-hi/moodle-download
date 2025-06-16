@@ -303,7 +303,6 @@ class MoodleContentScript {
       return undefined;
     }
   }
-
   /**
    * Sanitize course name for safe use in filenames
    */
@@ -311,16 +310,17 @@ class MoodleContentScript {
     // Remove or replace invalid filename characters
     let sanitized = courseName
       .replace(/[<>:"/\\|?*]/g, '_') // Replace invalid chars with underscore
-      .replace(/\s+/g, '_') // Replace spaces with underscore
+      .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
       .replace(/_{2,}/g, '_') // Replace multiple underscores with single
-      .replace(/^_+|_+$/g, ''); // Remove leading/trailing underscores
+      .replace(/^_+|_+$/g, '') // Remove leading/trailing underscores
+      .trim(); // Remove leading/trailing spaces
 
     // Truncate to safe length (50 characters)
     if (sanitized.length > 50) {
-      sanitized = sanitized.substring(0, 50).replace(/_+$/, '');
+      sanitized = sanitized.substring(0, 50).replace(/\s+$/, '').trim();
     }
 
-    return sanitized || 'moodle_course';
+    return sanitized || 'moodle course';
   }
   /**
    * Fix double-encoded UTF-8 characters commonly found in Moodle

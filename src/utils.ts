@@ -144,7 +144,6 @@ export class DOMUtils {  /**
   static isTilesLayout(): boolean {
     return document.querySelector('ul.tiles#multi_section_tiles') !== null;
   }
-
   /**
    * Extract clean title from activity link, removing accessibility text
    * @param link The activity link element
@@ -167,12 +166,20 @@ export class DOMUtils {  /**
 
       // If we have a meaningful title, use it
       if (cleanTitle && cleanTitle.length > 0) {
+        // Check if this is a folder and add ZIP indicator
+        if (URLUtils.isMoodleFolder(link.href)) {
+          cleanTitle += ' (ZIP)';
+        }
         return cleanTitle;
       }
     }
 
     // Fallback to full link text
-    return link.textContent?.trim();
+    let fallbackTitle = link.textContent?.trim();
+    if (fallbackTitle && URLUtils.isMoodleFolder(link.href)) {
+      fallbackTitle += ' (ZIP)';
+    }
+    return fallbackTitle;
   }
   /**
    * Extract preferred filename from activity link, using instancename if available
@@ -192,14 +199,16 @@ export class DOMUtils {  /**
       accessHideElements.forEach(element => element.remove());
 
       // Get the remaining text content
-      let instanceName = clonedSpan.textContent?.trim() || '';
-
-      // If we have a meaningful instance name, use it
+      let instanceName = clonedSpan.textContent?.trim() || '';      // If we have a meaningful instance name, use it
       if (instanceName && instanceName.length > 0) {
         // Sanitize the filename by removing invalid characters
         instanceName = instanceName.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();
 
-        // Don't add an extension - let the browser/system handle it based on content type
+        // Add .zip extension for folders
+        if (URLUtils.isMoodleFolder(link.href)) {
+          instanceName += '.zip';
+        }
+
         return instanceName;
       }
     }
@@ -207,7 +216,6 @@ export class DOMUtils {  /**
     // Fallback to URL-based extraction
     return this.extractFilenameFromURL(link.href);
   }
-
   /**
    * Extract filename from a URL, handling Moodle's specific URL patterns
    * @param url The URL to extract filename from
@@ -216,6 +224,13 @@ export class DOMUtils {  /**
   private static extractFilenameFromURL(url: string): string | undefined {
     try {
       const urlObj = new URL(url);
+
+      // Check if this is a folder URL
+      if (URLUtils.isMoodleFolder(url)) {
+        // For folders, return a generic folder name with .zip extension
+        const id = urlObj.searchParams.get('id');
+        return id ? `folder_${id}.zip` : 'folder.zip';
+      }
 
       // Handle Moodle file URLs that might have filename in path
       const pathParts = urlObj.pathname.split('/');
@@ -404,13 +419,43 @@ export class DOMUtils {  /**
  */
 export class URLUtils {
   /**
-   * Add redirect parameter to Moodle URLs if not already present
-   * @param url The original URL
-   * @returns URL with &redirect=1 parameter added if needed
+   * Convert folder URLs to downloadable ZIP format
+   * @param url The original folder URL
+   * @returns URL for downloading the folder as a ZIP file
    */
-  static ensureRedirectParameter(url: string): string {
+  static convertFolderToZipURL(url: string): string {
     try {
       const urlObj = new URL(url);
+
+      // Check if this is a folder URL
+      if (urlObj.pathname.includes('/mod/folder/')) {
+        // Extract the id parameter
+        const id = urlObj.searchParams.get('id');
+        if (id) {
+          // Construct the download URL
+          const baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+          return `${baseUrl}/mod/folder/download_folder.php?id=${id}`;
+        }
+      }
+
+      return url; // Return original URL if not a folder or no ID found
+    } catch (error) {
+      console.error('Error converting folder URL:', error);
+      return url; // Return original URL if parsing fails
+    }
+  }
+
+  /**
+   * Add redirect parameter to Moodle URLs if not already present
+   * Also converts folder URLs to downloadable ZIP format
+   * @param url The original URL
+   * @returns URL with &redirect=1 parameter added if needed, or converted to ZIP download for folders
+   */  static ensureRedirectParameter(url: string): string {
+    try {
+      // First, check if this is a folder URL and convert it to ZIP download
+      const folderZipUrl = this.convertFolderToZipURL(url);
+
+      const urlObj = new URL(folderZipUrl);
 
       // Check if redirect parameter already exists
       if (!urlObj.searchParams.has('redirect')) {
@@ -423,7 +468,6 @@ export class URLUtils {
       return url; // Return original URL if parsing fails
     }
   }
-
   /**
    * Generate a safe filename for downloads
    * @param originalName The original filename
@@ -434,13 +478,13 @@ export class URLUtils {
     // Sanitize filename by removing/replacing invalid characters
     const sanitized = originalName
       .replace(/[<>:"/\\|?*]/g, '_')
-      .replace(/\s+/g, '_')
+      .replace(/\s+/g, ' ')
       .trim();
 
     if (folderName) {
       const sanitizedFolder = folderName
         .replace(/[<>:"/\\|?*]/g, '_')
-        .replace(/\s+/g, '_')
+        .replace(/\s+/g, ' ')
         .trim();
 
       return `${sanitizedFolder}/${sanitized}`;
@@ -520,6 +564,48 @@ export class URLUtils {
       return this.isValidMoodleURL(url);
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Check if a URL is a Moodle folder
+   * @param url The URL to check
+   * @returns True if the URL is a Moodle folder
+   */
+  static isMoodleFolder(url: string): boolean {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.pathname.includes('/mod/folder/');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get the appropriate file extension for a Moodle URL
+   * @param url The URL to check
+   * @returns The file extension (e.g., '.zip' for folders, or extracted from URL)
+   */
+  static getFileExtension(url: string): string {
+    try {
+      // Check if it's a folder first
+      if (this.isMoodleFolder(url)) {
+        return '.zip';
+      }
+
+      // For other URLs, try to extract extension from the URL
+      const urlObj = new URL(url);
+      const pathname = urlObj.pathname;
+      const match = pathname.match(/\.([a-zA-Z0-9]{2,5})(?:\?|$)/);
+
+      if (match) {
+        return '.' + match[1];
+      }
+
+      // Default extension if none found
+      return '';
+    } catch {
+      return '';
     }
   }
 }

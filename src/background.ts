@@ -71,8 +71,7 @@ class MoodleBackgroundService {
     /**
      * Handle ZIP download request from popup
      * @param message Download ZIP message with selected files
-     */
-    private async handleZipDownloadRequest(message: DownloadZipMessage): Promise<void> {
+     */    private async handleZipDownloadRequest(message: DownloadZipMessage): Promise<void> {
         const errors: string[] = [];
         let downloadedCount = 0;
 
@@ -81,6 +80,8 @@ class MoodleBackgroundService {
 
             // Create a map to store all file data for the ZIP
             const zipFiles: Zippable = {};
+            // Track used file paths to handle duplicates
+            const usedPaths = new Set<string>();
 
             // Process files one by one to avoid memory issues
             for (let i = 0; i < message.files.length; i++) {
@@ -92,7 +93,10 @@ class MoodleBackgroundService {
                 try {
                     const fileData = await this.downloadFileForZip(file);
                     if (fileData) {
-                        zipFiles[fileData.path] = fileData.content;
+                        // Ensure unique path to prevent overwrites
+                        const uniquePath = this.getUniqueZipPath(fileData.path, usedPaths);
+                        zipFiles[uniquePath] = fileData.content;
+                        usedPaths.add(uniquePath);
                         downloadedCount++;
                     }
                 } catch (error) {
@@ -106,12 +110,14 @@ class MoodleBackgroundService {
                     if (file.folder) {
                         errorPath = `${this.sanitizeFolderName(file.folder)}/${file.filename}.error.txt`;
                     }
-                    zipFiles[errorPath] = strToU8(errorContent);
+                    const uniqueErrorPath = this.getUniqueZipPath(errorPath, usedPaths);
+                    zipFiles[uniqueErrorPath] = strToU8(errorContent);
+                    usedPaths.add(uniqueErrorPath);
                 }
 
                 // Small delay to prevent overwhelming the server
                 await new Promise(resolve => setTimeout(resolve, 100));
-            }            // Generate ZIP using fflate (more memory efficient)
+            }// Generate ZIP using fflate (more memory efficient)
             Logger.info('Generating ZIP file...');
 
             const zipBuffer = zipSync(zipFiles, { level: 6 });
@@ -455,6 +461,38 @@ class MoodleBackgroundService {
         } catch (error) {
             Logger.warn('Could not send message to popup (popup may be closed):', error);
         }
+    }
+
+    /**
+     * Generate a unique ZIP path to prevent duplicate filenames from overwriting each other
+     * @param originalPath The original file path
+     * @param usedPaths Set of already used paths
+     * @returns A unique path that doesn't conflict with existing ones
+     */
+    private getUniqueZipPath(originalPath: string, usedPaths: Set<string>): string {
+        if (!usedPaths.has(originalPath)) {
+            return originalPath;
+        }
+
+        // Extract directory, filename and extension
+        const lastSlashIndex = originalPath.lastIndexOf('/');
+        const directory = lastSlashIndex >= 0 ? originalPath.substring(0, lastSlashIndex + 1) : '';
+        const filename = lastSlashIndex >= 0 ? originalPath.substring(lastSlashIndex + 1) : originalPath;
+        
+        const lastDotIndex = filename.lastIndexOf('.');
+        const nameWithoutExt = lastDotIndex >= 0 ? filename.substring(0, lastDotIndex) : filename;
+        const extension = lastDotIndex >= 0 ? filename.substring(lastDotIndex) : '';
+
+        // Try adding numbers until we find a unique path
+        let counter = 1;
+        let uniquePath: string;
+        do {
+            uniquePath = `${directory}${nameWithoutExt} (${counter})${extension}`;
+            counter++;
+        } while (usedPaths.has(uniquePath));
+
+        Logger.info(`Duplicate filename detected, renamed: ${originalPath} -> ${uniquePath}`);
+        return uniquePath;
     }
 }
 
