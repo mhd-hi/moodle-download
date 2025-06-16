@@ -49,12 +49,14 @@ export class DOMUtils {
 
         tiles.forEach((tile, index) => {
             const titleElement = tile.querySelector<HTMLElement>('h3');
-            const title = titleElement?.textContent?.trim() || 'Unknown Section';
-            console.log(`Tile ${index}: "${title}"`);
-
-            // Get the section number from the tile's data-section attribute
+            const tileName = titleElement?.textContent?.trim() || 'Unknown Section';
+            console.log(`Tile ${index}: "${tileName}"`);            // Get the section number from the tile's data-section attribute
             const sectionNumber = tile.getAttribute('data-section');
             console.log(`Tile ${index} section number:`, sectionNumber);
+
+            // Create folder name, avoiding duplicate numbering if tile name already has it
+            const folderName = this.createTileFolderName(sectionNumber, tileName);
+            console.log(`Tile ${index} folder name: "${folderName}"`);
 
             const activities: ActivityLink[] = [];
 
@@ -76,7 +78,7 @@ export class DOMUtils {
 
                     // Don't add the tile link itself as a downloadable file
                     // Instead, log that this section needs dynamic loading
-                    console.log(`Section "${title}" appears to have no downloadable files, or content needs to be loaded dynamically`);
+                    console.log(`Section "${folderName}" appears to have no downloadable files, or content needs to be loaded dynamically`);
 
                     // We could implement dynamic loading here in the future
                     // For now, we'll skip empty sections rather than treating them as HTML downloads
@@ -86,7 +88,7 @@ export class DOMUtils {
             // Always add the section if we have a title, even if no activities
             // This ensures all tiles are visible to the user
             if (activities.length > 0) {
-                sections.push({ title, activities });
+                sections.push({ title: folderName, activities });
             }
         });
 
@@ -367,9 +369,7 @@ export class DOMUtils {
 
         console.log(`Total activities found in loaded section content: ${activities.length}`);
         return activities;
-    }
-
-    /**
+    }    /**
      * Attempt to load content for empty tile sections by fetching their URLs
      * @returns Array of tile sections with their dynamically loaded activities
      */
@@ -384,8 +384,11 @@ export class DOMUtils {
 
         for (const tile of tiles) {
             const titleElement = tile.querySelector('h3') as HTMLElement;
-            const title = titleElement?.textContent?.trim() || 'Unknown Section';
+            const tileName = titleElement?.textContent?.trim() || 'Unknown Section';
             const sectionNumber = tile.getAttribute('data-section');
+
+            // Create folder name, avoiding duplicate numbering if tile name already has it
+            const folderName = this.createTileFolderName(sectionNumber, tileName);
 
             if (sectionNumber) {
                 // First check if section element already has content
@@ -422,11 +425,53 @@ export class DOMUtils {
                 }
 
                 if (activities.length > 0) {
-                    sections.push({ title, activities });
+                    sections.push({ title: folderName, activities });
                 }
             }
         }
 
         return sections;
+    }    /**
+     * Check if a tile name already starts with a number annotation like "1. " or "12.3 "
+     * @param tileName The tile name to check
+     * @returns True if the tile name already starts with a number annotation
+     * 
+     * Examples:
+     * - "1. Introduction" -> true (already has number annotation)
+     * - "2. Getting Started" -> true (already has number annotation) 
+     * - "12.1 Advanced Topics" -> true (already has decimal number annotation)
+     * - "12.3 Complex Systems" -> true (already has decimal number annotation)
+     * - "Algorithmes récursifs (1%)" -> false (no number annotation)
+     * - "Module 3" -> false (doesn't start with "number. " pattern)
+     */
+    private static tileNameHasNumberAnnotation(tileName: string): boolean {
+        // Check if the title starts with a number (possibly decimal) followed by a dot and space
+        // Patterns: "1. ", "2. ", "12.1 ", "12.3 ", "1.5 ", etc.
+        return /^\d+\.\s/.test(tileName);
+    }    /**
+     * Create a folder name for a tile, avoiding duplicate numbering if the tile name already has it
+     * @param sectionNumber The section number from data-section attribute
+     * @param tileName The original tile name
+     * @returns Properly formatted folder name
+     * 
+     * Examples:
+     * - sectionNumber="2", tileName="Algorithmes récursifs (1%)" -> "2 Algorithmes récursifs (1%)"
+     * - sectionNumber="1", tileName="1. Introduction" -> "1. Introduction" (no duplicate numbering)
+     * - sectionNumber="3", tileName="3. Advanced Topics" -> "3. Advanced Topics" (no duplicate numbering)
+     * - sectionNumber="12", tileName="12.1 Complex Systems" -> "12.1 Complex Systems" (no duplicate numbering)
+     * - sectionNumber="12", tileName="12.3 Advanced Methods" -> "12.3 Advanced Methods" (no duplicate numbering)
+     */
+    private static createTileFolderName(sectionNumber: string | null, tileName: string): string {
+        if (!sectionNumber) {
+            return tileName;
+        }
+
+        // If the tile name already starts with a number annotation, don't add another one
+        if (this.tileNameHasNumberAnnotation(tileName)) {
+            return tileName;
+        }
+
+        // Otherwise, add the section number prefix
+        return `${sectionNumber} ${tileName}`;
     }
 }
