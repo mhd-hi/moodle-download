@@ -3,7 +3,8 @@ import { ActivityLink, TileSection } from './types';
 /**
  * Utility functions for DOM manipulation and URL processing
  */
-export class DOMUtils {  /**
+export class DOMUtils {
+  /**
    * Find all activity links in the standard Moodle layout
    * @returns Array of activity links found in .activityname containers
    */
@@ -501,7 +502,8 @@ export class URLUtils {
       const urlObj = new URL(url);
 
       // Check for common Moodle URL patterns
-      const pathname = urlObj.pathname.toLowerCase();      // Exclude non-downloadable Moodle activities
+      const pathname = urlObj.pathname.toLowerCase();
+      // Exclude non-downloadable Moodle activities
       const excludedPatterns = [
         '/mod/forum/',
         '/forum/',
