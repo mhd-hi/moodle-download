@@ -77,10 +77,9 @@ export class URLUtils {
         }
 
         return sanitized;
-    }
-
-    /**
+    }    /**
      * Check if URL is a valid Moodle download URL
+     * Excludes non-downloadable content like forums, quizzes, and external sites like Safe Exam Browser
      * @param url The URL to validate
      * @returns True if URL appears to be a downloadable Moodle resource
      */
@@ -109,7 +108,17 @@ export class URLUtils {
                 '/mod/assign/',
             ];
 
+            // Exclude specific external URLs that shouldn't be downloaded
+            const excludedDomains = [
+                'safeexambrowser.org'
+            ];
+
             if (excludedPatterns.some(pattern => pathname.includes(pattern))) {
+                return false;
+            }
+
+            // Check if the domain is in the excluded list
+            if (excludedDomains.some(domain => urlObj.hostname.includes(domain))) {
                 return false;
             }
 
