@@ -44,10 +44,29 @@ class MoodleContentScript {
           sendResponse({ success: false, error: 'Unknown message type' });
       }
     } catch (error) {
-      Logger.error('Error handling message:', error);
-      sendResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
+      Logger.error('Error handling message:', error); sendResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
     }
+  }  /**
+   * Send progress update to popup via background script
+   */
+  private sendProgress(foundCount: number): void {
+    chrome.runtime.sendMessage({
+      type: 'SCAN_PROGRESS',
+      foundCount: foundCount
+    });
   }
+  /**
+   * Add a file and send progress update with async delay
+   */
+  private async addFileWithProgressAsync(files: DiscoveredFile[], file: DiscoveredFile): Promise<void> {
+    files.push(file);
+    const count = files.length;
+    this.sendProgress(count);
+
+    // Add small delay to make progress visible (for fast but visible updates)
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+
   /**
    * Scan the current page for downloadable content
    */
@@ -60,74 +79,66 @@ class MoodleContentScript {
     try {
       if (DOMUtils.isTilesLayout()) {
         Logger.info('Detected tiles layout');
-        layout = 'tiles';
-
-        // First try the standard approach - looking in section elements
+        layout = 'tiles';        // First try the standard approach - looking in section elements
         const sections = DOMUtils.findTileSections();
-        Logger.info(`Found ${sections.length} sections with activities from section elements`); sections.forEach(section => {
+        Logger.info(`Found ${sections.length} sections with activities from section elements`);
+
+        for (const section of sections) {
           Logger.info(`Section "${section.title}" has ${section.activities.length} activities`);
-          section.activities.forEach(activity => {
+          for (const activity of section.activities) {
             if (URLUtils.isValidMoodleURL(activity.url)) {
               const file = this.createDiscoveredFile(activity, section.title);
-              files.push(file);
+              await this.addFileWithProgressAsync(files, file);
             }
-          });
-        });        // If no files found in sections, try alternative approaches
+          }
+        }// If no files found in sections, try alternative approaches
         if (files.length === 0) {
-          Logger.info('No files found in section elements, trying dynamic loading...');
-
-          // Try to load tile content dynamically
+          Logger.info('No files found in section elements, trying dynamic loading...');          // Try to load tile content dynamically
           const dynamicSections = await DOMUtils.loadTileSectionsContent();
           Logger.info(`Found ${dynamicSections.length} sections with dynamic content`);
 
-          dynamicSections.forEach(section => {
-            section.activities.forEach(activity => {
+          for (const section of dynamicSections) {
+            for (const activity of section.activities) {
               if (URLUtils.isValidMoodleURL(activity.url)) {
                 const file = this.createDiscoveredFile(activity, section.title);
-                files.push(file);
+                await this.addFileWithProgressAsync(files, file);
               }
-            });
-          });
+            }
+          }
 
           // If still no files after dynamic loading, try fallback approaches
           if (files.length === 0) {
-            Logger.info('No files found after dynamic loading, trying fallback approaches...');
-
-            // Try looking for any downloadable links throughout the page
+            Logger.info('No files found after dynamic loading, trying fallback approaches...');            // Try looking for any downloadable links throughout the page
             const allActivities = DOMUtils.findAllActivityLinks();
             Logger.info(`Found ${allActivities.length} total activity links on page`);
 
-            allActivities.forEach(activity => {
+            for (const activity of allActivities) {
               if (URLUtils.isValidMoodleURL(activity.url)) {
                 const file = this.createDiscoveredFile(activity);
-                files.push(file);
+                await this.addFileWithProgressAsync(files, file);
               }
-            });
-
-            // If still no files, try scanning the entire tiles container
+            }            // If still no files, try scanning the entire tiles container
             if (files.length === 0) {
               Logger.info('Still no files found, scanning entire tiles container...');
               const tilesFiles = DOMUtils.findFilesInTilesContainer();
               Logger.info(`Found ${tilesFiles.length} files in tiles container`);
 
-              tilesFiles.forEach(activity => {
+              for (const activity of tilesFiles) {
                 if (URLUtils.isValidMoodleURL(activity.url)) {
                   const file = this.createDiscoveredFile(activity);
-                  files.push(file);
+                  await this.addFileWithProgressAsync(files, file);
                 }
-              });
-            }
-
-            // Try one more approach - look for loaded section content anywhere
+              }
+            }            // Try one more approach - look for loaded section content anywhere
             if (files.length === 0) {
               Logger.info('Trying to find loaded section content anywhere in DOM...');
               const loadedContent = DOMUtils.findLoadedSectionContent();
               Logger.info(`Found ${loadedContent.length} files in loaded section content`);
 
-              loadedContent.forEach(activity => {
+              for (const activity of loadedContent) {
                 const file = this.createDiscoveredFile(activity);
-                files.push(file);
-              });
+                await this.addFileWithProgressAsync(files, file);
+              }
             }
           }
         }
@@ -136,12 +147,12 @@ class MoodleContentScript {
         layout = 'standard';
         const activities = DOMUtils.findStandardActivityLinks();
 
-        activities.forEach(activity => {
+        for (const activity of activities) {
           if (URLUtils.isValidMoodleURL(activity.url)) {
             const file = this.createDiscoveredFile(activity);
-            files.push(file);
+            await this.addFileWithProgressAsync(files, file);
           }
-        });
+        }
       } Logger.info(`Found ${files.length} downloadable files`);
 
       // Check file sizes and disable large files

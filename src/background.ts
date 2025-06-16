@@ -1,4 +1,4 @@
-import { ExtensionMessage, DownloadZipMessage, DownloadableFile } from './types';
+import { ExtensionMessage, DownloadZipMessage, ScanProgressMessage, DownloadableFile } from './types';
 import { URLUtils, Logger } from './utils';
 import { zipSync, strToU8, Zippable } from 'fflate';
 import { CONFIG } from './config';
@@ -53,6 +53,12 @@ class MoodleBackgroundService {
                     sendResponse({ success: true });
                     break;
 
+                case 'SCAN_PROGRESS':
+                    // Forward progress message to popup
+                    this.forwardMessageToPopup(message as ScanProgressMessage);
+                    sendResponse({ success: true });
+                    break;
+
                 case 'STATUS':
                     Logger.info(`Status message: ${message.message}`);
                     sendResponse({ success: true });
@@ -66,12 +72,24 @@ class MoodleBackgroundService {
             Logger.error('Error handling message:', error);
             sendResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
         }
+    }    /**
+     * Forward message to popup window
+     */
+    private async forwardMessageToPopup(message: ScanProgressMessage): Promise<void> {
+        try {
+            // Send message to popup via runtime.sendMessage
+            // This will be received by the popup's chrome.runtime.onMessage listener
+            chrome.runtime.sendMessage(message);
+        } catch (error) {
+            Logger.error('Error forwarding message to popup:', error);
+        }
     }
 
     /**
      * Handle ZIP download request from popup
      * @param message Download ZIP message with selected files
-     */    private async handleZipDownloadRequest(message: DownloadZipMessage): Promise<void> {
+     */
+    private async handleZipDownloadRequest(message: DownloadZipMessage): Promise<void> {
         const errors: string[] = [];
         let downloadedCount = 0;
 

@@ -1,4 +1,4 @@
-import { DiscoveredFile, ScanResultMessage, DownloadZipMessage, DownloadCompleteMessage } from './types';
+import { DiscoveredFile, ScanResultMessage, ScanProgressMessage, DownloadZipMessage, DownloadCompleteMessage } from './types';
 import { Logger } from './utils';
 
 /**
@@ -9,7 +9,6 @@ class MoodlePopup {
     private files: DiscoveredFile[] = [];
     private layout: 'standard' | 'tiles' = 'standard';
     private courseName: string | undefined;
-
     // DOM elements
     private loadingEl!: HTMLElement;
     private errorEl!: HTMLElement;
@@ -20,9 +19,10 @@ class MoodlePopup {
     private totalCountEl!: HTMLElement;
     private filesContainerEl!: HTMLElement;
     private downloadBtnEl!: HTMLButtonElement;
-    private downloadTextEl!: HTMLElement;
-    private selectAllBtnEl!: HTMLButtonElement;
+    private downloadTextEl!: HTMLElement; private selectAllBtnEl!: HTMLButtonElement;
     private selectNoneBtnEl!: HTMLButtonElement;
+    private foundCountEl!: HTMLElement;
+    private scanProgressEl!: HTMLElement;
 
     constructor() {
         this.init();
@@ -46,6 +46,8 @@ class MoodlePopup {
         this.downloadTextEl = document.getElementById('download-text')!;
         this.selectAllBtnEl = document.getElementById('select-all') as HTMLButtonElement;
         this.selectNoneBtnEl = document.getElementById('select-none') as HTMLButtonElement;
+        this.foundCountEl = document.getElementById('found-count')!;
+        this.scanProgressEl = document.getElementById('scan-progress')!;
 
         // Set up event listeners
         this.setupEventListeners();
@@ -66,14 +68,15 @@ class MoodlePopup {
         this.downloadBtnEl.addEventListener('click', () => this.handleDownload());
         this.selectAllBtnEl.addEventListener('click', () => this.selectAll());
         this.selectNoneBtnEl.addEventListener('click', () => this.selectNone());
-    }
-
-    /**
+    }    /**
      * Scan the current tab for downloadable files
      */
     private async scanCurrentTab(): Promise<void> {
         try {
             Logger.info('Scanning current tab for files');
+
+            // Hide progress initially 
+            this.scanProgressEl.style.display = 'none';
 
             // Get current tab
             const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -132,7 +135,6 @@ class MoodlePopup {
         this.updateCounts();
         this.renderFiles();
     }
-
     /**
      * Render the files list
      */
@@ -144,6 +146,8 @@ class MoodlePopup {
         } else {
             this.renderStandardLayout();
         }
+
+        this.updateCounts();
     }
 
     /**
@@ -280,6 +284,8 @@ class MoodlePopup {
         const selectedFiles = this.files.filter(f => f.selected);
 
         if (selectedFiles.length === 0) {
+            Logger.warn('No files selected for download');
+            this.showError('Please select at least one file to download');
             return;
         }
 
@@ -331,6 +337,17 @@ class MoodlePopup {
             }, 3000);
         }
     }    /**
+     * Handle scan progress message from content script
+     */
+    private handleScanProgress(message: ScanProgressMessage): void {
+        // Show progress div when we get the first file
+        if (message.foundCount > 0) {
+            this.scanProgressEl.style.display = 'block';
+            this.foundCountEl.textContent = message.foundCount.toString();
+        }
+    }
+
+    /**
      * Generate filename for a file
      */
     private generateFilename(file: DiscoveredFile): string {
@@ -371,11 +388,13 @@ class MoodlePopup {
     }    /**
      * Handle messages from background script
      */
-    private handleBackgroundMessage(message: DownloadCompleteMessage): void {
+    private handleBackgroundMessage(message: any): void {
         if (message.type === 'DOWNLOAD_COMPLETE') {
-            this.handleDownloadComplete(message);
+            this.handleDownloadComplete(message as DownloadCompleteMessage);
+        } else if (message.type === 'SCAN_PROGRESS') {
+            this.handleScanProgress(message as ScanProgressMessage);
         }
-    }    /**
+    }/**
      * Handle download completion message from background
      */
     private handleDownloadComplete(message: DownloadCompleteMessage): void {

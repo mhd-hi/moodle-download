@@ -16,6 +16,11 @@ export interface ScanResultMessage {
   courseName?: string;
 }
 
+export interface ScanProgressMessage {
+  type: 'SCAN_PROGRESS';
+  foundCount: number;
+}
+
 export interface DownloadZipMessage {
   type: 'DOWNLOAD_ZIP';
   files: DownloadableFile[];
@@ -37,7 +42,7 @@ export interface StatusMessage {
   message: string;
 }
 
-export type ExtensionMessage = ScanMessage | ScanResultMessage | DownloadZipMessage | DownloadCompleteMessage | StatusMessage;
+export type ExtensionMessage = ScanMessage | ScanResultMessage | ScanProgressMessage | DownloadZipMessage | DownloadCompleteMessage | StatusMessage;
 
 /**
  * Discovered file from Moodle page scanning
