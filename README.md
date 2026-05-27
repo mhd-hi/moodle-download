@@ -1,5 +1,5 @@
 # Moodle Downloader Extension
-
+> Vibecoded app (bad quality code)
 A Chrome Extension that allows you to selectively download course materials from Moodle platforms as organized ZIP files.
 
 ## Features
