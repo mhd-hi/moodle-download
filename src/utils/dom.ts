@@ -5,23 +5,15 @@ import { URLUtils } from '../utils';
  * Utility functions for DOM manipulation and URL processing
  */
 export class DOMUtils {
-    /**
-     * Find all activity links in the standard Moodle layout
-     * @returns Array of activity links found in .activityname containers
-     */
     static findStandardActivityLinks(): ActivityLink[] {
-        const activityContainers = document.querySelectorAll<HTMLElement>('.activityname');
         const activities: ActivityLink[] = [];
 
-        activityContainers.forEach(container => {
+        document.querySelectorAll<HTMLElement>('.activityname').forEach(container => {
             const link = container.querySelector<HTMLAnchorElement>('a[href]');
-            if (link && link.href) {
-                const cleanTitle = this.extractCleanTitle(link);
-                const filename = this.extractPreferredFilename(link);
+            if (link?.href) {
                 activities.push({
-                    url: link.href,
-                    title: cleanTitle || 'Unknown Activity',
-                    originalFilename: filename
+                    ...this.toActivity(link),
+                    folder: this.findActivityFolder(container),
                 });
             }
         });
@@ -30,308 +22,226 @@ export class DOMUtils {
     }
 
     /**
-     * Find all tile sections in the tiles layout
-     * @returns Array of tile sections with their activities
+     * Find the tab/section path containing an activity.
+     * Moodle uses both tab panels and regular course sections, depending on
+     * the course format. The returned path becomes the ZIP folder path.
      */
-    static findTileSections(): TileSection[] {
-        const tilesContainer = document.querySelector<HTMLElement>('ul.tiles#multi_section_tiles');
-        if (!tilesContainer) {
-            console.log('No tiles container found');
-            return [];
+    private static findActivityFolder(activity: HTMLElement): string | undefined {
+        const parts: string[] = [];
+        let current: HTMLElement | null = activity;
+
+        while (current) {
+            const panelName = this.findTabPanelName(current);
+            if (panelName && !parts.includes(panelName)) {
+                parts.unshift(panelName);
+            }
+
+            const sectionName = this.findSectionName(current);
+            if (sectionName && !parts.includes(sectionName)) {
+                parts.unshift(sectionName);
+            }
+
+            current = current.parentElement;
         }
 
-        console.log('Found tiles container:', tilesContainer);
+        return parts.length > 0 ? parts.join('/') : undefined;
+    }
 
-        const tiles = tilesContainer.querySelectorAll<HTMLElement>('li.tile:not(.spacer)');
-        console.log('Found tiles:', tiles.length);
+    private static findTabPanelName(element: HTMLElement): string | undefined {
+        const isPanel = element.getAttribute('role') === 'tabpanel' || element.classList.contains('tab-pane');
+        if (!isPanel) return undefined;
+
+        const label = element.getAttribute('aria-label');
+        if (label?.trim()) return label.trim();
+
+        const labelledBy = element.getAttribute('aria-labelledby');
+        if (labelledBy) {
+            const labelElement = document.getElementById(labelledBy);
+            if (labelElement?.textContent?.trim()) return labelElement.textContent.trim();
+        }
+
+        if (element.id) {
+            const tab = Array.from(document.querySelectorAll<HTMLElement>('[aria-controls]'))
+                .find(candidate => candidate.getAttribute('aria-controls') === element.id);
+            if (tab?.textContent?.trim()) return tab.textContent.trim();
+
+            const link = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
+                .find(candidate => candidate.hash === `#${element.id}`);
+            if (link?.textContent?.trim()) return link.textContent.trim();
+        }
+
+        return undefined;
+    }
+
+    private static findSectionName(element: HTMLElement): string | undefined {
+        const section = element.closest<HTMLElement>(
+            '.section, .course-section, li[id^="section-"], [data-for="section"], [data-region="section"]'
+        );
+        if (!section) return undefined;
+
+        const heading = section.querySelector<HTMLElement>(
+            '.sectionname, .section-title, .coursesectionname, h2, h3'
+        );
+        return heading?.textContent?.trim() || undefined;
+    }
+
+    static findTileSections(): TileSection[] {
+        const tilesContainer = document.querySelector<HTMLElement>('ul.tiles#multi_section_tiles');
+        if (!tilesContainer) return [];
 
         const sections: TileSection[] = [];
 
-        tiles.forEach((tile, index) => {
-            const titleElement = tile.querySelector<HTMLElement>('h3');
-            const tileName = titleElement?.textContent?.trim() || 'Unknown Section';
-            console.log(`Tile ${index}: "${tileName}"`);            // Get the section number from the tile's data-section attribute
+        tilesContainer.querySelectorAll<HTMLElement>('li.tile:not(.spacer)').forEach(tile => {
+            const tileName = tile.querySelector<HTMLElement>('h3')?.textContent?.trim() || 'Unknown Section';
             const sectionNumber = tile.getAttribute('data-section');
-            console.log(`Tile ${index} section number:`, sectionNumber);
-
-            // Create folder name, avoiding duplicate numbering if tile name already has it
             const folderName = this.createTileFolderName(sectionNumber, tileName);
-            console.log(`Tile ${index} folder name: "${folderName}"`);
-
-            const activities: ActivityLink[] = [];
 
             if (sectionNumber) {
-                // First, try to find activities in the corresponding section element
                 const sectionElement = document.querySelector<HTMLElement>(`#section-${sectionNumber}`);
-                console.log(`Looking for section element: #section-${sectionNumber}`);
-                console.log('Found section element:', sectionElement);
-
                 if (sectionElement) {
-                    const sectionActivities = this.findActivitiesInSection(sectionElement);
-                    console.log(`Section ${sectionNumber} activities:`, sectionActivities.length);
-                    activities.push(...sectionActivities);
+                    const activities = this.findActivitiesInSection(sectionElement);
+                    if (activities.length > 0) {
+                        sections.push({ title: folderName, activities });
+                    }
                 }
-
-                // If no activities found in section, try to load the section content dynamically
-                if (activities.length === 0) {
-                    console.log(`No activities found in section ${sectionNumber}, checking if tile can be expanded...`);
-
-                    // Don't add the tile link itself as a downloadable file
-                    // Instead, log that this section needs dynamic loading
-                    console.log(`Section "${folderName}" appears to have no downloadable files, or content needs to be loaded dynamically`);
-
-                    // We could implement dynamic loading here in the future
-                    // For now, we'll skip empty sections rather than treating them as HTML downloads
-                }
-            }
-
-            // Always add the section if we have a title, even if no activities
-            // This ensures all tiles are visible to the user
-            if (activities.length > 0) {
-                sections.push({ title: folderName, activities });
             }
         });
 
-        console.log('Total sections with activities:', sections.length);
         return sections;
     }
 
-    /**
-     * Find activities within a specific section element (used for tiles layout)
-     * @param section The section DOM element to search within
-     * @returns Array of activity links found in the section
-     */
     private static findActivitiesInSection(section: HTMLElement): ActivityLink[] {
-        console.log('Searching in section:', section);
-        console.log('Section innerHTML:', section.innerHTML);
-
-        // Look for actual downloadable content using more specific selectors
         const activitySelectors = [
-            '.activityname a[href]',           // Standard activity links
-            '.activity-name-area a[href]',     // Alternative activity links
-            '.activity a[href]',               // General activity links
-            'a[href*="mod/resource"]',         // Resource module links
-            'a[href*="mod/folder"]',           // Folder module links
-            'a[href*="pluginfile.php"]',       // Direct file links
-            'a[href*="/file.php"]',            // File.php links
-            '.format-tiles-cm-list a[href]'    // Activity links in tile content lists
+            '.activityname a[href]',
+            '.activity-name-area a[href]',
+            '.activity a[href]',
+            'a[href*="mod/resource"]',
+            'a[href*="mod/folder"]',
+            'a[href*="pluginfile.php"]',
+            'a[href*="/file.php"]',
+            '.format-tiles-cm-list a[href]'
         ];
 
         const activities: ActivityLink[] = [];
-        const foundUrls = new Set<string>(); // Prevent duplicates
+        const foundUrls = new Set<string>();
 
         activitySelectors.forEach(selector => {
-            const links = section.querySelectorAll<HTMLAnchorElement>(selector);
-            console.log(`Found ${links.length} links for selector: ${selector}`);
-
-            links.forEach((link) => {
-                if (link.href && !foundUrls.has(link.href)) {
-                    // Only include if it's a valid Moodle download URL (not HTML pages)
-                    if (URLUtils.isValidMoodleURL(link.href)) {
-                        console.log(`Valid downloadable link ${activities.length}:`, link.href, link.textContent?.trim());
-                        foundUrls.add(link.href);
-
-                        const cleanTitle = this.extractCleanTitle(link);
-                        const filename = this.extractPreferredFilename(link);
-                        activities.push({
-                            url: link.href,
-                            title: cleanTitle || 'Unknown Activity',
-                            originalFilename: filename
-                        });
-                    } else {
-                        console.log(`Skipping non-downloadable URL:`, link.href);
-                    }
+            section.querySelectorAll<HTMLAnchorElement>(selector).forEach(link => {
+                if (link.href && !foundUrls.has(link.href) && URLUtils.isValidMoodleURL(link.href)) {
+                    foundUrls.add(link.href);
+                    activities.push(this.toActivity(link));
                 }
             });
         });
 
-        console.log(`Total valid downloadable activities found: ${activities.length}`);
         return activities;
     }
 
-    /**
-     * Check if the page uses the tiles layout
-     * @returns True if tiles layout is detected
-     */
     static isTilesLayout(): boolean {
         return document.querySelector('ul.tiles#multi_section_tiles') !== null;
     }
 
-    /**
-     * Extract clean title from activity link, removing accessibility text
-     * @param link The activity link element
-     * @returns Clean title without accessibility text
-     */
+    /** Shared link → ActivityLink conversion used by every finder above. */
+    private static toActivity(link: HTMLAnchorElement): ActivityLink {
+        return {
+            url: link.href,
+            title: this.extractCleanTitle(link) || link.textContent?.trim() || 'Unknown Activity',
+            originalFilename: this.extractPreferredFilename(link)
+        };
+    }
+
+    /** Clean title from activity link, removing accessibility text. */
     private static extractCleanTitle(link: HTMLAnchorElement): string | undefined {
-        // Look for instancename span within the link
         const instanceNameSpan = link.querySelector<HTMLSpanElement>('.instancename');
 
         if (instanceNameSpan) {
-            // Clone the element to avoid modifying the original DOM
             const clonedSpan = instanceNameSpan.cloneNode(true) as HTMLSpanElement;
+            clonedSpan.querySelectorAll('.accesshide').forEach(element => element.remove());
 
-            // Remove all accessibility text elements
-            const accessHideElements = clonedSpan.querySelectorAll('.accesshide');
-            accessHideElements.forEach(element => element.remove());
-
-            // Get the remaining text content
-            let cleanTitle = clonedSpan.textContent?.trim() || '';
-
-            // If we have a meaningful title, use it
-            if (cleanTitle && cleanTitle.length > 0) {
-                // Check if this is a folder and add ZIP indicator
-                if (URLUtils.isMoodleFolder(link.href)) {
-                    cleanTitle += ' (ZIP)';
-                }
-                return cleanTitle;
+            const cleanTitle = clonedSpan.textContent?.trim() || '';
+            if (cleanTitle) {
+                return URLUtils.isMoodleFolder(link.href) ? `${cleanTitle} (ZIP)` : cleanTitle;
             }
         }
 
-        // Fallback to full link text
-        let fallbackTitle = link.textContent?.trim();
+        const fallbackTitle = link.textContent?.trim();
         if (fallbackTitle && URLUtils.isMoodleFolder(link.href)) {
-            fallbackTitle += ' (ZIP)';
+            return `${fallbackTitle} (ZIP)`;
         }
         return fallbackTitle;
     }
 
-    /**
-     * Extract preferred filename from activity link, using instancename if available
-     * @param link The activity link element
-     * @returns Preferred filename or fallback to URL-based extraction
-     */
+    /** Preferred filename from instancename span, falling back to URL extraction. */
     private static extractPreferredFilename(link: HTMLAnchorElement): string | undefined {
-        // Look for instancename span within the link
         const instanceNameSpan = link.querySelector<HTMLSpanElement>('.instancename');
 
         if (instanceNameSpan) {
-            // Clone the element to avoid modifying the original DOM
             const clonedSpan = instanceNameSpan.cloneNode(true) as HTMLSpanElement;
+            clonedSpan.querySelectorAll('.accesshide').forEach(element => element.remove());
 
-            // Remove all accessibility text elements
-            const accessHideElements = clonedSpan.querySelectorAll('.accesshide');
-            accessHideElements.forEach(element => element.remove());
-
-            // Get the remaining text content
             let instanceName = clonedSpan.textContent?.trim() || '';
-
-            // If we have a meaningful instance name, use it
-            if (instanceName && instanceName.length > 0) {
-                // Sanitize the filename by removing invalid characters
+            if (instanceName) {
                 instanceName = instanceName.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();
-
-                // Add .zip extension for folders
-                if (URLUtils.isMoodleFolder(link.href)) {
-                    instanceName += '.zip';
-                }
-
-                return instanceName;
+                return URLUtils.isMoodleFolder(link.href) ? `${instanceName}.zip` : instanceName;
             }
         }
 
-        // Fallback to URL-based extraction
         return this.extractFilenameFromURL(link.href);
     }
 
-    /**
-     * Extract filename from a URL, handling Moodle's specific URL patterns
-     * @param url The URL to extract filename from
-     * @returns Extracted filename or null if not found
-     */
     private static extractFilenameFromURL(url: string): string | undefined {
         try {
             const urlObj = new URL(url);
 
-            // Check if this is a folder URL
             if (URLUtils.isMoodleFolder(url)) {
-                // For folders, return a generic folder name with .zip extension
                 const id = urlObj.searchParams.get('id');
                 return id ? `folder_${id}.zip` : 'folder.zip';
             }
 
-            // Handle Moodle file URLs that might have filename in path
             const pathParts = urlObj.pathname.split('/');
             const lastPart = pathParts[pathParts.length - 1];
 
-            // If last part has an extension, use it as filename
-            if (lastPart && lastPart.includes('.')) {
+            if (lastPart?.includes('.')) {
                 return decodeURIComponent(lastPart);
             }
 
-            // Otherwise, try to generate a meaningful filename
             return undefined;
-        } catch (error) {
-            console.error('Error extracting filename from URL:', error);
+        } catch {
             return undefined;
         }
     }
 
-    /**
-     * Find all activity links throughout the page (fallback method)
-     * @returns Array of all activity links found anywhere on the page
-     */
+    /** Fallback: all activity links anywhere on the page. */
     static findAllActivityLinks(): ActivityLink[] {
-        const allLinks = document.querySelectorAll<HTMLAnchorElement>('a[href]');
-        console.log('Total links found on page:', allLinks.length);
-
         const activities: ActivityLink[] = [];
 
-        allLinks.forEach((link) => {
-            if (link.href) {
-                const isValid = URLUtils.isValidMoodleURL(link.href);
-                if (isValid) {
-                    console.log(`Valid Moodle URL ${activities.length}:`, link.href, link.textContent?.trim());
-                    const cleanTitle = this.extractCleanTitle(link);
-                    const filename = this.extractPreferredFilename(link);
-                    activities.push({
-                        url: link.href,
-                        title: cleanTitle || link.textContent?.trim() || 'Unknown Activity',
-                        originalFilename: filename
-                    });
-                }
+        document.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(link => {
+            if (link.href && URLUtils.isValidMoodleURL(link.href)) {
+                activities.push(this.toActivity(link));
             }
         });
 
-        console.log('Total valid Moodle URLs found:', activities.length);
         return activities;
     }
 
-    /**
-     * Find downloadable files specifically within the tiles container
-     * @returns Array of activity links found in the tiles container
-     */
+    /** Fallback: downloadable files inside the tiles container. */
     static findFilesInTilesContainer(): ActivityLink[] {
         const tilesContainer = document.querySelector<HTMLElement>('ul.tiles#multi_section_tiles');
-        if (!tilesContainer) {
-            return [];
-        }
+        if (!tilesContainer) return [];
 
-        const allLinks = tilesContainer.querySelectorAll<HTMLAnchorElement>('a[href]');
         const activities: ActivityLink[] = [];
 
-        allLinks.forEach(link => {
+        tilesContainer.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(link => {
             if (link.href && URLUtils.isValidMoodleURL(link.href)) {
-                const cleanTitle = this.extractCleanTitle(link);
-                const filename = this.extractPreferredFilename(link);
-                activities.push({
-                    url: link.href,
-                    title: cleanTitle || link.textContent?.trim() || 'Unknown Activity',
-                    originalFilename: filename
-                });
+                activities.push(this.toActivity(link));
             }
         });
 
         return activities;
     }
 
-    /**
-     * Find any section content that might be loaded elsewhere in the DOM
-     * @returns Array of activity links found in any section content
-     */
+    /** Fallback: any loaded section content elsewhere in the DOM. */
     static findLoadedSectionContent(): ActivityLink[] {
-        console.log('Looking for loaded section content...');
-
-        // Look for any elements that might contain section content
         const sectionContentSelectors = [
             '.format_tiles_section_content',
             '.course-content',
@@ -343,135 +253,247 @@ export class DOMUtils {
         const activities: ActivityLink[] = [];
 
         sectionContentSelectors.forEach(selector => {
-            const containers = document.querySelectorAll<HTMLElement>(selector);
-            console.log(`Found ${containers.length} containers for selector: ${selector}`);
-
-            containers.forEach((container, index) => {
-                console.log(`Checking container ${index} for ${selector}:`, container);
-
-                const activityLinks = container.querySelectorAll<HTMLAnchorElement>('a[href]');
-                console.log(`Found ${activityLinks.length} links in this container`);
-
-                activityLinks.forEach(link => {
+            document.querySelectorAll<HTMLElement>(selector).forEach(container => {
+                container.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(link => {
                     if (link.href && URLUtils.isValidMoodleURL(link.href)) {
-                        console.log('Valid link found:', link.href, link.textContent?.trim());
-                        const cleanTitle = this.extractCleanTitle(link);
-                        const filename = this.extractPreferredFilename(link);
-                        activities.push({
-                            url: link.href,
-                            title: cleanTitle || link.textContent?.trim() || 'Unknown Activity',
-                            originalFilename: filename
-                        });
+                        activities.push(this.toActivity(link));
                     }
                 });
             });
         });
 
-        console.log(`Total activities found in loaded section content: ${activities.length}`);
         return activities;
-    }    /**
-     * Attempt to load content for empty tile sections by fetching their URLs
-     * @returns Array of tile sections with their dynamically loaded activities
-     */
+    }
+
+    /** Attempt to load content for empty tile sections by clicking their tiles. */
     static async loadTileSectionsContent(): Promise<TileSection[]> {
         const tilesContainer = document.querySelector<HTMLElement>('ul.tiles#multi_section_tiles');
-        if (!tilesContainer) {
-            return [];
-        }
+        if (!tilesContainer) return [];
 
         const tiles = Array.from(tilesContainer.querySelectorAll<HTMLElement>('li.tile:not(.spacer)'));
         const sections: TileSection[] = [];
 
         for (const tile of tiles) {
-            const titleElement = tile.querySelector('h3') as HTMLElement;
-            const tileName = titleElement?.textContent?.trim() || 'Unknown Section';
+            const tileName = tile.querySelector('h3')?.textContent?.trim() || 'Unknown Section';
             const sectionNumber = tile.getAttribute('data-section');
-
-            // Create folder name, avoiding duplicate numbering if tile name already has it
             const folderName = this.createTileFolderName(sectionNumber, tileName);
 
-            if (sectionNumber) {
-                // First check if section element already has content
-                const sectionElement = document.querySelector<HTMLElement>(`#section-${sectionNumber}`);
-                let activities: ActivityLink[] = [];
+            if (!sectionNumber) continue;
 
-                if (sectionElement && sectionElement.innerHTML.trim()) {
-                    activities = this.findActivitiesInSection(sectionElement);
-                }
+            const sectionElement = document.querySelector<HTMLElement>(`#section-${sectionNumber}`);
+            let activities: ActivityLink[] = [];
 
-                // If no activities found, try to load the section dynamically
-                if (activities.length === 0) {
-                    console.log(`Attempting to load content for section ${sectionNumber}...`);
+            if (sectionElement?.innerHTML.trim()) {
+                activities = this.findActivitiesInSection(sectionElement);
+            }
 
-                    // Try clicking the tile to load content
-                    const tileLink = tile.querySelector('a.tile-link') as HTMLAnchorElement;
-                    if (tileLink) {
-                        try {
-                            // Simulate a click to potentially load content
-                            tileLink.click();
-
-                            // Wait a moment for content to load
-                            await new Promise(resolve => setTimeout(resolve, 500));
-
-                            // Check again for loaded content
-                            if (sectionElement) {
-                                activities = this.findActivitiesInSection(sectionElement);
-                                console.log(`After clicking tile, found ${activities.length} activities`);
-                            }
-                        } catch (error) {
-                            console.log(`Error clicking tile for section ${sectionNumber}:`, error);
-                        }
+            if (activities.length === 0) {
+                const tileLink = tile.querySelector('a.tile-link') as HTMLAnchorElement | null;
+                if (tileLink && sectionElement) {
+                    try {
+                        tileLink.click();
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        activities = this.findActivitiesInSection(sectionElement);
+                    } catch {
+                        // Leave activities empty — section stays skipped
                     }
                 }
+            }
 
-                if (activities.length > 0) {
-                    sections.push({ title: folderName, activities });
-                }
+            if (activities.length > 0) {
+                sections.push({ title: folderName, activities });
             }
         }
 
         return sections;
-    }    /**
-     * Check if a tile name already starts with a number annotation like "1. " or "12.3 "
-     * @param tileName The tile name to check
-     * @returns True if the tile name already starts with a number annotation
-     * 
-     * Examples:
-     * - "1. Introduction" -> true (already has number annotation)
-     * - "2. Getting Started" -> true (already has number annotation) 
-     * - "12.1 Advanced Topics" -> true (already has decimal number annotation)
-     * - "12.3 Complex Systems" -> true (already has decimal number annotation)
-     * - "Algorithmes récursifs (1%)" -> false (no number annotation)
-     * - "Module 3" -> false (doesn't start with "number. " pattern)
-     */
+    }
+
+    /** "1. Intro" already has a number annotation; "Intro" needs the section number prefixed. */
     private static tileNameHasNumberAnnotation(tileName: string): boolean {
-        // Check if the title starts with a number (possibly decimal) followed by a dot and space
-        // Patterns: "1. ", "2. ", "12.1 ", "12.3 ", "1.5 ", etc.
         return /^\d+\.\s/.test(tileName);
-    }    /**
-     * Create a folder name for a tile, avoiding duplicate numbering if the tile name already has it
-     * @param sectionNumber The section number from data-section attribute
-     * @param tileName The original tile name
-     * @returns Properly formatted folder name
-     * 
-     * Examples:
-     * - sectionNumber="2", tileName="Algorithmes récursifs (1%)" -> "2 Algorithmes récursifs (1%)"
-     * - sectionNumber="1", tileName="1. Introduction" -> "1. Introduction" (no duplicate numbering)
-     * - sectionNumber="3", tileName="3. Advanced Topics" -> "3. Advanced Topics" (no duplicate numbering)
-     * - sectionNumber="12", tileName="12.1 Complex Systems" -> "12.1 Complex Systems" (no duplicate numbering)
-     * - sectionNumber="12", tileName="12.3 Advanced Methods" -> "12.3 Advanced Methods" (no duplicate numbering)
-     */
+    }
+
     private static createTileFolderName(sectionNumber: string | null, tileName: string): string {
-        if (!sectionNumber) {
+        if (!sectionNumber || this.tileNameHasNumberAnnotation(tileName)) {
             return tileName;
         }
-
-        // If the tile name already starts with a number annotation, don't add another one
-        if (this.tileNameHasNumberAnnotation(tileName)) {
-            return tileName;
-        }
-
-        // Otherwise, add the section number prefix
         return `${sectionNumber} ${tileName}`;
+    }
+
+    /**
+     * Extract tab/section text as Markdown, keyed by folder name.
+     * Innermost container wins when nested, so text isn't duplicated
+     * across a tab and its sections.
+     */
+    static extractNotesByFolder(): Map<string, { markdown: string; images: string[] }> {
+        const candidates: Array<{ folder: string; el: HTMLElement }> = [];
+        const seen = new Set<Element>();
+        const consider = (folder: string | undefined, el: HTMLElement | null) => {
+            if (!folder || !el || seen.has(el)) return;
+            // Messaging/contacts UI is not course content.
+            if (el.closest('.message-drawer, [data-region="lazy-load-list"], [data-region="message-drawer"]')) return;
+            seen.add(el);
+            candidates.push({ folder, el });
+        };
+
+        if (this.isTilesLayout()) {
+            document.querySelectorAll<HTMLElement>('ul.tiles#multi_section_tiles li.tile:not(.spacer)').forEach(tile => {
+                const sectionNumber = tile.getAttribute('data-section');
+                const tileName = tile.querySelector('h3')?.textContent?.trim() || 'Unknown Section';
+                if (sectionNumber) {
+                    consider(
+                        this.createTileFolderName(sectionNumber, tileName),
+                        document.querySelector<HTMLElement>(`#section-${sectionNumber}`)
+                    );
+                }
+            });
+        }
+
+        document.querySelectorAll<HTMLElement>('.course-section, li[id^="section-"], [data-for="section"], [data-region="section"]').forEach(sec => {
+            if (/^section-\d+$/.test(sec.id) && this.isTilesLayout()) return; // Covered by the tile pass
+            consider(this.findActivityFolder(sec), sec);
+        });
+
+        document.querySelectorAll<HTMLElement>('[role="tabpanel"], .tab-pane').forEach(panel => {
+            consider(this.findActivityFolder(panel), panel);
+        });
+
+        // Label activities act as sub-folder headers (e.g. an h3 "Diapositives"
+        // grouping the files below it) — same folder key as the files get.
+        document.querySelectorAll<HTMLElement>('li.activity.label, li.modtype_label').forEach(label => {
+            consider(this.findActivityFolder(label), label);
+        });
+
+        // Generic Bootstrap-style tabs (e.g. OneTopic): nav links point at panes.
+        document.querySelectorAll<HTMLElement>('[role="tablist"], .nav-tabs, .nav-pills').forEach(tablist => {
+            tablist.querySelectorAll<HTMLElement>('[role="tab"], a[href^="#"]').forEach(tab => {
+                const text = tab.textContent?.trim();
+                if (!text) return;
+                let panel: HTMLElement | null = null;
+                const controls = tab.getAttribute('aria-controls');
+                if (controls) panel = document.getElementById(controls);
+                if (!panel && tab instanceof HTMLAnchorElement && tab.hash.length > 1) {
+                    panel = document.getElementById(tab.hash.slice(1));
+                }
+                if (panel) consider(this.findActivityFolder(panel) || text, panel);
+            });
+        });
+
+        const notes = new Map<string, { markdown: string; images: string[] }>();
+        candidates.forEach(({ folder, el }) => {
+            const { markdown: md, images } = this.elementToMarkdown(el);
+            if (md.replace(/\s+/g, ' ').trim().length < 20 && images.length === 0) return;
+            const prev = notes.get(folder);
+            notes.set(folder, prev
+                ? { markdown: `${prev.markdown}\n\n---\n\n${md}`, images: [...prev.images, ...images] }
+                : { markdown: md, images });
+        });
+
+        return notes;
+    }
+
+    /** Nested sections are extracted as their own notes — parents keep only their own text. */
+    private static readonly NESTED_SECTION_SEL =
+        'li[id^="section-"], [data-for="section"], [data-region="section"], [role="tabpanel"], .tab-pane, .course-section, li.activity.label, li.modtype_label, ul.tiles#multi_section_tiles li.tile:not(.spacer)';
+
+    private static isHiddenElement(el: HTMLElement): boolean {
+        if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return true;
+        const classes = (el.getAttribute('class') || '').split(/\s+/);
+        return classes.includes('accesshide') || classes.includes('visually-hidden') || classes.includes('sr-only');
+    }
+
+    /** Convert an element to Markdown: headings, text, file links, images. */
+    private static elementToMarkdown(root: HTMLElement): { markdown: string; images: string[] } {
+        const parts: string[] = [];
+        const collected: string[] = [];
+        const inlineChildren = (el: HTMLElement): string =>
+            Array.from(el.childNodes).map(c => inline(c)).join('').replace(/\s+/g, ' ').trim();
+        const pushBlock = (text: string) => {
+            const t = text.trim();
+            if (t) parts.push(t);
+        };
+        const inline = (node: Node, isRoot = false): string => {
+            if (node.nodeType === 3) return (node.textContent || '').replace(/\s+/g, ' ');
+            if (node.nodeType !== 1) return '';
+            const el = node as HTMLElement;
+            if (this.isHiddenElement(el)) return '';
+            if (!isRoot && el.matches(DOMUtils.NESTED_SECTION_SEL)) return '';
+            const kids = Array.from(el.childNodes).map(c => inline(c)).join('');
+            switch (el.tagName) {
+                case 'A': {
+                    const href = this.absUrl(el.getAttribute('href'));
+                    const text = kids.trim() || href;
+                    return href ? `[${text}](${href})` : text;
+                }
+                case 'IMG': {
+                    const src = this.absUrl(el.getAttribute('src'));
+                    const alt = el.getAttribute('alt')?.trim() || 'image';
+                    if (src && !collected.includes(src)) collected.push(src);
+                    return src ? `![${alt}](${src})` : '';
+                }
+                case 'B': case 'STRONG': return kids.trim() ? `**${kids.trim()}**` : '';
+                case 'I': case 'EM': return kids.trim() ? `*${kids.trim()}*` : '';
+                case 'CODE': return kids.trim() ? `\`${kids.trim()}\`` : '';
+                case 'BR': return '\n';
+                default: return kids;
+            }
+        };
+        const blocks = (node: Node): void => {
+            if (node.nodeType === 3) {
+                pushBlock((node.textContent || '').replace(/\s+/g, ' '));
+                return;
+            }
+            if (node.nodeType !== 1) return;
+            const el = node as HTMLElement;
+            if (this.isHiddenElement(el)) return;
+            if (el.matches(DOMUtils.NESTED_SECTION_SEL)) return;
+            const tag = el.tagName;
+            if (/^H[1-6]$/.test(tag)) {
+                pushBlock(`${'#'.repeat(parseInt(tag.charAt(1), 10))} ${inlineChildren(el)}`);
+                return;
+            }
+            switch (tag) {
+                case 'LI': pushBlock(`- ${inlineChildren(el)}`); return;
+                case 'TR': {
+                    const cells = Array.from(el.children)
+                        .map(c => inlineChildren(c as HTMLElement)).filter(Boolean);
+                    pushBlock(`| ${cells.join(' | ')} |`);
+                    return;
+                }
+                case 'HR': parts.push('---'); return;
+                case 'PRE': {
+                    const t = (el.textContent || '').replace(/\n+$/, '');
+                    if (t.trim()) parts.push(`\`\`\`\n${t}\n\`\`\``);
+                    return;
+                }
+                case 'BLOCKQUOTE': {
+                    const t = inlineChildren(el);
+                    if (t) pushBlock(t.split('\n').map(l => `> ${l}`).join('\n'));
+                    return;
+                }
+                case 'P': case 'DIV': case 'SECTION': case 'ARTICLE': case 'HEADER': case 'FOOTER':
+                case 'UL': case 'OL': case 'TABLE': case 'TBODY': case 'THEAD':
+                case 'FIGURE': case 'FIGCAPTION': case 'MAIN':
+                    Array.from(el.childNodes).forEach(blocks);
+                    return;
+                default: {
+                    const hasBlocks = Array.from(el.childNodes).some(n =>
+                        n.nodeType === 1 && /^(P|DIV|UL|OL|LI|H[1-6]|TABLE|PRE|BLOCKQUOTE|SECTION|ARTICLE|HEADER|FIGURE)$/.test((n as HTMLElement).tagName));
+                    if (hasBlocks) Array.from(el.childNodes).forEach(blocks);
+                    else pushBlock(inline(node));
+                    return;
+                }
+            }
+        };
+        Array.from(root.childNodes).forEach(blocks);
+        return {
+            markdown: parts.join('\n\n').replace(/\n{3,}/g, '\n\n').trim(),
+            images: collected,
+        };
+    }
+
+    private static absUrl(raw: string | null): string {
+        if (!raw || raw.startsWith('#') || raw.startsWith('javascript:')) return '';
+        try { return new URL(raw, document.baseURI).href; } catch { return ''; }
     }
 }

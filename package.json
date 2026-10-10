@@ -8,6 +8,7 @@
         "build:dev": "webpack --mode=development",
         "watch": "webpack --mode=development --watch",
         "clean": "rm -rf dist",
+        "zip": "cd dist && zip -r ../extension.zip .",
         "type-check": "tsc --noEmit"
     },
     "keywords": [

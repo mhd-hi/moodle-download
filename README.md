@@ -1,26 +1,27 @@
 # Moodle Downloader Extension
 
-A Chrome Extension that allows you to selectively download course materials from Moodle platforms as organized ZIP files.
+A Chrome Extension that selectively downloads course materials from any Moodle platform as organized ZIP files.
 
 ## Features
 
-- � **File Selection**: View all downloadable files with checkboxes (all selected by default)
-- 📦 **ZIP Downloads**: Single ZIP file containing all selected materials
-- 🔄 **Auto URL Processing**: Automatically adds `&redirect=1` parameter for direct downloads
-- 🎨 **User-Friendly**: Clean popup interface with file management
-- ⚡ **Modern Architecture**: Uses Chrome Extension Manifest V3
+- 📁 **Tab folders**: files are grouped by course tab/section, collapsible, each with its own select-all checkbox
+- 📝 **notes.md per folder**: tab text is exported as Markdown (headings, file links, images) with a content SHA, so edited tabs resurface as new
+- ✅ **Skip already-downloaded**: remembers what you downloaded and unselects it next time (toggleable, per-URL history with `Forget` to clear)
+- 📦 **ZIP downloads**: single ZIP with folder structure preserved, duplicate names auto-renamed
+- ❌ **Cancellable downloads**: stop a running ZIP build at any time
+- 🔄 **Resilient popup**: closing and reopening mid-scan or mid-download restores state instead of restarting
+- 🌍 **Universal**: works on any Moodle installation over HTTP(S), not just one university
+- 🔄 **Auto URL processing**: folder links converted to ZIP downloads, `&redirect=1` added automatically
+- ⚡ **Modern architecture**: Chrome Extension Manifest V3, TypeScript, auto-publish to the Web Store via GitHub Actions
 
 ## How to Use
 
-1. **Navigate** to any Moodle course page on `https://ena.etsmtl.ca/`
+1. **Navigate** to any Moodle course page
 2. **Click** the extension icon in your browser toolbar
-3. **Review** the list of downloadable files found on the page
-4. **Select/Deselect** files using checkboxes (all are selected by default)
-5. **Click** "Download as ZIP" to download selected files
-6. **Files are organized**:
-   - **Tiles layout**: ZIP contains folders named after course sections
-   - **Standard layout**: ZIP contains files directly
-
+3. **Review** the list of files grouped by tab (expand a group to see its files and `notes.md`)
+4. **Select/Deselect** files, whole tabs, or turn off `Skip already-downloaded` for full manual control
+5. **Click** "Download as ZIP" (or Cancel while it builds)
+6. Files land in your Downloads folder, organized in per-tab sub-folders
 
 ## Installation & Setup
 
@@ -38,8 +39,7 @@ npm install
 npm run build
 ```
 
-
-### 3. Load Extension in Chrome
+### 2. Load Extension in Chrome
 
 1. Open Chrome and navigate to `chrome://extensions/`
 2. Enable **Developer mode** (toggle in top right)
@@ -47,9 +47,9 @@ npm run build
 4. Select the `dist/` folder from this project
 5. The extension should now appear in your extensions list
 
-### 4. Test the Extension
+### 3. Test the Extension
 
-1. Navigate to a Moodle course page on `https://ena.etsmtl.ca/`
+1. Navigate to a Moodle course page
 2. Click the extension icon in your browser toolbar
 3. Review the list of files detected on the page
 4. Select/deselect files as needed
@@ -64,19 +64,19 @@ The extension uses a three-part architecture:
 
 1. **Content Script** (`contentScript.ts`):
    - Scans the DOM for downloadable links when requested
-   - Handles both standard and tiles layout modes
+   - Handles standard, tiles, and tabbed course layouts
+   - Extracts tab text as Markdown `notes.md` files with content hashes
    - Responds to scan requests from the popup
 
 2. **Popup Interface** (`popup.ts` and `popup.html`):
-   - Provides user interface for file selection
-   - Displays discovered files with checkboxes
-   - Handles user interactions and download requests
-   - Communicates with content script and background
+   - File selection grouped by collapsible tab folders
+   - Download history, skip-already-downloaded toggle, and cancel support
+   - Restores scan/download state after being closed and reopened
 
 3. **Background Service Worker** (`background.ts`):
-   - Creates ZIP files from selected content
-   - Downloads files and packages them
-   - Manages the final ZIP download
+   - Creates ZIP files from selected content (fetched files + generated notes)
+   - Persists scan/download state and download history in `chrome.storage.local`
+   - Manages the final ZIP download, per-download cancellation included
 
 ## License
 

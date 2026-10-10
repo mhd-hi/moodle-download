@@ -11,10 +11,26 @@ body {
 .header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
     margin-bottom: 16px;
     padding-bottom: 12px;
     border-bottom: 1px solid #e0e0e0;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.github-link {
+    display: flex;
+    color: #6b7280;
+}
+
+.github-link:hover {
+    color: #111827;
 }
 
 .header h1 {
@@ -38,6 +54,31 @@ body {
     text-align: center;
     color: #666;
     min-height: 120px;
+}
+
+.scan-start {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 32px 16px;
+    text-align: center;
+    color: #475569;
+}
+
+.scan-page-btn {
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: white;
+    background: #1976d2;
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.scan-page-btn:hover {
+    background: #1565c0;
 }
 
 .scan-progress {
@@ -91,7 +132,37 @@ body {
 
 .select-controls {
     display: flex;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.settings {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 10px;
+}
+
+.setting-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #475569;
+    cursor: pointer;
+    user-select: none;
+}
+
+.select-btn.link {
+    border-color: transparent;
+    color: #64748b;
+    text-decoration: underline;
+}
+
+.file-downloaded {
+    font-size: 11px;
+    color: #059669;
+    font-weight: 500;
 }
 
 .select-btn {
@@ -116,18 +187,61 @@ body {
 }
 
 .file-group {
-    margin-bottom: 16px;
+    margin-bottom: 12px;
+    border: 1px solid #dbeafe;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.file-group.collapsed .folder-files {
+    display: none;
 }
 
 .folder-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-weight: 600;
     font-size: 13px;
-    color: #374151;
-    margin-bottom: 8px;
-    padding: 6px 8px;
-    background: #f9fafb;
-    border-radius: 4px;
-    border-left: 3px solid #1976d2;
+    color: #1e3a8a;
+    padding: 8px;
+    background: #eff6ff;
+    cursor: pointer;
+    user-select: none;
+}
+
+.folder-toggle {
+    width: 14px;
+    color: #64748b;
+}
+
+.folder-checkbox {
+    cursor: pointer;
+}
+
+.folder-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.folder-count {
+    font-size: 11px;
+    font-weight: 500;
+    color: #475569;
+    background: #fff;
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    padding: 1px 8px;
+    white-space: nowrap;
+}
+
+.folder-files {
+    margin-left: 16px;
+    padding: 4px 4px 4px 8px;
+    border-left: 2px solid #dbeafe;
 }
 
 .file-item {
@@ -200,10 +314,28 @@ body {
 .download-section {
     border-top: 1px solid #e0e0e0;
     padding-top: 16px;
+    display: flex;
+    gap: 8px;
+}
+
+.cancel-btn {
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #dc2626;
+    background: #fff;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.cancel-btn:hover {
+    background: #fef2f2;
 }
 
 .download-btn {
-    width: 100%;
+    flex: 1;
     padding: 12px;
     font-size: 14px;
     font-weight: 600;

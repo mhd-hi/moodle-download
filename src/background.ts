@@ -1,13 +1,22 @@
-import { ExtensionMessage, DownloadZipMessage, ScanProgressMessage, DownloadableFile } from './types';
+import { ExtensionMessage, DownloadZipMessage, CancelDownloadMessage, ScanProgressMessage, ScanResultMessage, DownloadableFile, PersistedScan, PersistedDownload } from './types';
 import { URLUtils, Logger } from './utils';
 import { zipSync, strToU8, Zippable } from 'fflate';
 import { CONFIG } from './config';
 
 /**
  * Background service worker for Moodle Downloader Chrome Extension
- * Handles ZIP creation and download operations
+ * Handles ZIP creation and download operations.
+ * Also persists scan/download state so a reopened popup restores instead of restarting.
  */
 class MoodleBackgroundService {
+    private static readonly SCAN_KEY = 'md_scan';
+    private static readonly DOWNLOAD_KEY = 'md_download';
+    private static readonly HISTORY_KEY = 'md_downloaded_urls';
+    private lastProgressPersist = 0;
+    private activeDownloadId: string | null = null;
+    private cancelledDownloadIds = new Set<string>();
+    private activeFetch: AbortController | null = null;
+
     constructor() {
         this.init();
     }
@@ -16,8 +25,6 @@ class MoodleBackgroundService {
      * Initialize the background service worker
      */
     private init(): void {
-        Logger.info('Background service worker initialized');
-
         // Listen for messages from popup and content scripts
         (globalThis as any).chrome.runtime.onMessage.addListener(
             (message: ExtensionMessage, _sender: any, sendResponse: any) => {
@@ -25,16 +32,6 @@ class MoodleBackgroundService {
                 return true; // Indicates async response
             }
         );
-
-        // Listen for extension startup
-        (globalThis as any).chrome.runtime.onStartup.addListener(() => {
-            Logger.info('Extension started');
-        });
-
-        // Listen for extension installation
-        (globalThis as any).chrome.runtime.onInstalled.addListener((details: any) => {
-            Logger.info(`Extension installed/updated: ${details.reason}`);
-        });
     }
 
     /**
@@ -53,16 +50,54 @@ class MoodleBackgroundService {
                     sendResponse({ success: true });
                     break;
 
-                case 'SCAN_PROGRESS':
-                    // Forward progress message to popup
-                    this.forwardMessageToPopup(message as ScanProgressMessage);
+                case 'SCAN_PROGRESS': {
+                    const progress = message as ScanProgressMessage;
+                    // Throttle persistence — progress fires per file.
+                    const now = Date.now();
+                    if (now - this.lastProgressPersist > 1000) {
+                        this.lastProgressPersist = now;
+                        const scan: PersistedScan = {
+                            status: 'scanning',
+                            pageUrl: progress.pageUrl || '',
+                            files: [],
+                            layout: 'standard',
+                            foundCount: progress.foundCount,
+                            at: now
+                        };
+                        chrome.storage.local.set({ [MoodleBackgroundService.SCAN_KEY]: scan }).catch(() => { /* ignore */ });
+                    }
+                    this.forwardMessageToPopup(progress);
                     sendResponse({ success: true });
                     break;
+                }
 
-                case 'STATUS':
-                    Logger.info(`Status message: ${message.message}`);
+                case 'SCAN_RESULT': {
+                    // Content script broadcasts its result so state survives a closed popup.
+                    const result = message as ScanResultMessage;
+                    const scan: PersistedScan = {
+                        status: 'done',
+                        pageUrl: result.pageUrl || '',
+                        files: result.files,
+                        layout: result.layout,
+                        courseName: result.courseName,
+                        foundCount: result.files.length,
+                        at: Date.now()
+                    };
+                    await chrome.storage.local.set({ [MoodleBackgroundService.SCAN_KEY]: scan }).catch(() => { /* ignore */ });
+                    this.forwardMessageToPopup(result);
                     sendResponse({ success: true });
                     break;
+                }
+
+                case 'CANCEL_DOWNLOAD': {
+                    const cancelId = (message as CancelDownloadMessage).downloadId;
+                    if (!cancelId || cancelId === this.activeDownloadId) {
+                        if (this.activeDownloadId) this.cancelledDownloadIds.add(this.activeDownloadId);
+                        this.activeFetch?.abort();
+                    }
+                    sendResponse({ success: true });
+                    break;
+                }
 
                 default:
                     Logger.warn('Unknown message type:', message);
@@ -75,10 +110,8 @@ class MoodleBackgroundService {
     }    /**
      * Forward message to popup window
      */
-    private async forwardMessageToPopup(message: ScanProgressMessage): Promise<void> {
+    private async forwardMessageToPopup(message: ScanProgressMessage | ScanResultMessage): Promise<void> {
         try {
-            // Send message to popup via runtime.sendMessage
-            // This will be received by the popup's chrome.runtime.onMessage listener
             chrome.runtime.sendMessage(message);
         } catch (error) {
             Logger.error('Error forwarding message to popup:', error);
@@ -92,37 +125,44 @@ class MoodleBackgroundService {
     private async handleZipDownloadRequest(message: DownloadZipMessage): Promise<void> {
         const errors: string[] = [];
         let downloadedCount = 0;
+        const downloadId = message.downloadId;
+        this.activeDownloadId = downloadId;
+        this.cancelledDownloadIds.delete(downloadId);
+
+        const downloading: PersistedDownload = {
+            status: 'downloading', success: false,
+            downloadedCount: 0, totalCount: message.files.length, errors: [], at: Date.now(),
+            downloadId
+        };
+        await chrome.storage.local.set({ [MoodleBackgroundService.DOWNLOAD_KEY]: downloading }).catch(() => { /* ignore */ });
 
         try {
-            Logger.info(`Creating ZIP with ${message.files.length} files`);
-
-            // Create a map to store all file data for the ZIP
             const zipFiles: Zippable = {};
-            // Track used file paths to handle duplicates
             const usedPaths = new Set<string>();
 
-            // Process files one by one to avoid memory issues
             for (let i = 0; i < message.files.length; i++) {
+                if (this.cancelledDownloadIds.has(downloadId)) break;
                 const file = message.files[i];
                 if (!file) continue;
-
-                Logger.info(`Processing file ${i + 1}/${message.files.length}: ${file.title}`);
 
                 try {
                     const fileData = await this.downloadFileForZip(file);
                     if (fileData) {
-                        // Ensure unique path to prevent overwrites
                         const uniquePath = this.getUniqueZipPath(fileData.path, usedPaths);
                         zipFiles[uniquePath] = fileData.content;
                         usedPaths.add(uniquePath);
+                        for (const extra of fileData.extra || []) {
+                            const uniqueExtraPath = this.getUniqueZipPath(extra.path, usedPaths);
+                            zipFiles[uniqueExtraPath] = extra.content;
+                            usedPaths.add(uniqueExtraPath);
+                        }
                         downloadedCount++;
                     }
                 } catch (error) {
+                    if (this.cancelledDownloadIds.has(downloadId)) break;
                     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
                     errors.push(`Failed to download ${file.title}: ${errorMessage}`);
-                    Logger.error(`Error processing file ${file.title}:`, error);
 
-                    // Add error file to ZIP
                     const errorContent = `Error downloading file: ${file.title}\nURL: ${file.url}\nError: ${errorMessage}`;
                     let errorPath = `${file.filename}.error.txt`;
                     if (file.folder) {
@@ -132,11 +172,21 @@ class MoodleBackgroundService {
                     zipFiles[uniqueErrorPath] = strToU8(errorContent);
                     usedPaths.add(uniqueErrorPath);
                 }
+            }
 
-                // Small delay to prevent overwhelming the server
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }// Generate ZIP using fflate (more memory efficient)
-            Logger.info('Generating ZIP file...');
+            if (this.cancelledDownloadIds.has(downloadId)) {
+                await this.finishDownload(downloadId, false, [], downloadedCount, message.files.length, ['Download cancelled']);
+                await this.sendMessageToPopup({
+                    type: 'DOWNLOAD_COMPLETE',
+                    success: false,
+                    downloadedCount,
+                    totalCount: message.files.length,
+                    errors: ['Download cancelled'],
+                    cancelled: true,
+                    downloadId
+                });
+                return;
+            }
 
             const zipBuffer = zipSync(zipFiles, { level: 6 });
 
@@ -148,13 +198,14 @@ class MoodleBackgroundService {
             const zipFilename = this.generateZipFilename(message.layout, message.courseName);
 
             // Download the ZIP file
-            const downloadId = await (globalThis as any).chrome.downloads.download({
+            await (globalThis as any).chrome.downloads.download({
                 url: zipUrl,
                 filename: zipFilename,
                 saveAs: false
             });
 
-            Logger.info(`ZIP download started with ID ${downloadId}: ${zipFilename}`);
+            // Persist completion (merges history so a closed popup doesn't lose it)
+            await this.finishDownload(downloadId, true, message.files.map(f => f.historyKey || f.url), downloadedCount, message.files.length, errors);
 
             // Send completion message to popup
             await this.sendMessageToPopup({
@@ -162,7 +213,8 @@ class MoodleBackgroundService {
                 success: true,
                 downloadedCount,
                 totalCount: message.files.length,
-                errors
+                errors,
+                downloadId
             });
 
         } catch (error) {
@@ -170,15 +222,33 @@ class MoodleBackgroundService {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             errors.push(`ZIP creation failed: ${errorMessage}`);
 
+            await this.finishDownload(downloadId, false, [], downloadedCount, message.files.length, errors);
+
             // Send failure message to popup
             await this.sendMessageToPopup({
                 type: 'DOWNLOAD_COMPLETE',
                 success: false,
                 downloadedCount,
                 totalCount: message.files.length,
-                errors
+                errors,
+                downloadId
             });
         }
+    }
+
+    private async finishDownload(downloadId: string, success: boolean, urls: string[], downloadedCount: number, totalCount: number, errors: string[]): Promise<void> {
+        try {
+            if (success && urls.length > 0) {
+                const got = await chrome.storage.local.get(MoodleBackgroundService.HISTORY_KEY);
+                const history = new Set<string>(Array.isArray(got[MoodleBackgroundService.HISTORY_KEY]) ? got[MoodleBackgroundService.HISTORY_KEY] : []);
+                urls.forEach(url => history.add(url));
+                await chrome.storage.local.set({ [MoodleBackgroundService.HISTORY_KEY]: [...history] });
+            }
+            const done: PersistedDownload = {
+                status: 'done', success, downloadedCount, totalCount, errors, at: Date.now(), downloadId
+            };
+            await chrome.storage.local.set({ [MoodleBackgroundService.DOWNLOAD_KEY]: done });
+        } catch { /* ignore */ }
     }
 
     /**
@@ -186,33 +256,64 @@ class MoodleBackgroundService {
      * @param file File to download
      * @returns File data for ZIP
      */
-    private async downloadFileForZip(file: DownloadableFile): Promise<{ path: string, content: Uint8Array } | null> {
-        const MAX_FILE_SIZE_LIMIT = CONFIG.maxFileSize; // Use config limit to prevent memory issues
+    private async downloadFileForZip(file: DownloadableFile): Promise<{ path: string, content: Uint8Array, extra?: Array<{ path: string, content: Uint8Array }> } | null> {
+        const MAX_FILE_SIZE_LIMIT = CONFIG.maxFileSize;
 
         try {
-            // Ensure URL has redirect parameter
+            if (file.generatedContent !== undefined) {
+                let notes = file.generatedContent;
+                const extra: Array<{ path: string, content: Uint8Array }> = [];
+                for (let i = 0; i < (file.images || []).length; i++) {
+                    const imageUrl = file.images?.[i];
+                    if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) continue;
+                    try {
+                        const imageResponse = await fetch(imageUrl, { credentials: 'include' });
+                        if (!imageResponse.ok) continue;
+                        const imageBytes = new Uint8Array(await imageResponse.arrayBuffer());
+                        if (imageBytes.length > MAX_FILE_SIZE_LIMIT) continue;
+                        const ext = this.getImageExtension(imageUrl, imageResponse.headers.get('content-type'));
+                        const imageName = `notes_images/image-${i + 1}.${ext}`;
+                        const imagePath = file.folder
+                            ? `${this.sanitizeFolderName(file.folder)}/${imageName}`
+                            : imageName;
+                        extra.push({ path: imagePath, content: imageBytes });
+                        notes = notes.split(imageUrl).join(`notes_images/image-${i + 1}.${ext}`);
+                    } catch {
+                        // Keep the original remote URL when an image cannot be fetched.
+                    }
+                }
+                const content = new TextEncoder().encode(notes);
+                if (content.length > MAX_FILE_SIZE_LIMIT) {
+                    throw new Error(`Generated file too large: ${file.title}`);
+                }
+                let generatedPath = this.sanitizeFilename(file.filename);
+                if (file.folder) {
+                    generatedPath = `${this.sanitizeFolderName(file.folder)}/${generatedPath}`;
+                }
+                return { path: generatedPath, content, extra };
+            }
+
             const downloadUrl = URLUtils.ensureRedirectParameter(file.url);
 
-            Logger.info(`Downloading file: ${file.title}`);
-
-            // Fetch the file content with timeout and follow redirects
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+            this.activeFetch = controller;
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-            const response = await fetch(downloadUrl, {
-                signal: controller.signal,
-                redirect: 'follow', // Follow redirects to get actual file
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            });
-            clearTimeout(timeoutId);
+            let response: Response;
+            try {
+                response = await fetch(downloadUrl, {
+                    signal: controller.signal,
+                    redirect: 'follow',
+                });
+            } finally {
+                clearTimeout(timeoutId);
+                if (this.activeFetch === controller) this.activeFetch = null;
+            }
 
             if (!response.ok) {
                 throw new Error(`Failed to fetch ${file.title}: ${response.status} ${response.statusText}`);
             }
-            // Get actual filename from response headers if available
-            let actualFilename = file.filename; // Start with our preferred filename
+            let actualFilename = file.filename;
             const contentDisposition = response.headers.get('content-disposition');            // Only use server filename if our filename doesn't have a valid extension
             if (!this.hasValidExtension(actualFilename) && contentDisposition) {
                 const matches = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
@@ -220,7 +321,6 @@ class MoodleBackgroundService {
                     const serverFilename = matches[1].replace(/['"]/g, '');
                     const decodedServerFilename = decodeURIComponent(serverFilename);
 
-                    // Extract just the extension from server filename if it has one
                     if (this.hasValidExtension(decodedServerFilename)) {
                         const serverExt = this.getFileExtension(decodedServerFilename);
                         actualFilename = `${actualFilename}.${serverExt}`;
@@ -228,55 +328,38 @@ class MoodleBackgroundService {
                 }
             }
 
-            // If still no proper filename, try to get extension from content type or URL
             if (!this.hasValidExtension(actualFilename)) {
                 const contentType = response.headers.get('content-type');
                 const urlPath = new URL(response.url).pathname;
                 const urlFilename = urlPath.split('/').pop();
 
-                Logger.info(`Determining extension for ${file.title}: contentType=${contentType}, urlFilename=${urlFilename}`);                // Try to get extension from URL first
                 if (urlFilename && this.hasValidExtension(urlFilename) && urlFilename !== 'view.php') {
-                    const urlExt = this.getFileExtension(urlFilename);
-                    actualFilename = `${actualFilename}.${urlExt}`;
-                    Logger.info(`Using URL extension: ${urlExt}`);
+                    actualFilename = `${actualFilename}.${this.getFileExtension(urlFilename)}`;
                 } else if (contentType) {
-                    // Get extension from content type
-                    const ext = this.getExtensionFromContentType(contentType);
-                    actualFilename = `${actualFilename}.${ext}`;
-                    Logger.info(`Using content-type extension: ${ext} (from ${contentType})`);
+                    actualFilename = `${actualFilename}.${this.getExtensionFromContentType(contentType)}`;
                 } else {
-                    // For Moodle course materials, PDF is the most common format
                     actualFilename = `${actualFilename}.pdf`;
-                    Logger.info(`Using default PDF extension`);
                 }
             }
 
-            // Sanitize the filename to ensure it's safe for file systems and ZIP files
             actualFilename = this.sanitizeFilename(actualFilename);
 
-            // Check file size to prevent memory issues (600MB limit)
             const contentLength = response.headers.get('content-length'); if (contentLength && parseInt(contentLength) > MAX_FILE_SIZE_LIMIT) {
                 throw new Error(`File too large: ${file.title} (${Math.round(parseInt(contentLength) / 1024 / 1024)}MB). Files over 50MB are skipped.`);
             } const fileBlob = await response.blob();
 
-            // Check actual blob size
             if (fileBlob.size > MAX_FILE_SIZE_LIMIT) {
                 throw new Error(`File too large after download: ${file.title} (${Math.round(fileBlob.size / 1024 / 1024)}MB). Files over 50MB are skipped.`);
             }
 
-            // Determine file path in ZIP using the actual filename
             let zipPath = actualFilename;
             if (file.folder) {
                 zipPath = `${this.sanitizeFolderName(file.folder)}/${actualFilename}`;
             }
 
-            // Convert blob to Uint8Array for fflate
             const arrayBuffer = await fileBlob.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
 
-            Logger.info(`Downloaded for ZIP: ${zipPath} (${Math.round(fileBlob.size / 1024)}KB)`);
-
-            return { path: zipPath, content: uint8Array };
+            return { path: zipPath, content: new Uint8Array(arrayBuffer) };
 
         } catch (error) {
             Logger.error(`Error downloading file for ZIP: ${file.title}`, error);
@@ -304,50 +387,16 @@ class MoodleBackgroundService {
      * @returns Generated ZIP filename
      */
     private generateZipFilename(layout: 'standard' | 'tiles', courseName?: string): string {
-        if (courseName) {
-            // Use course name if available
-            return `${courseName}.zip`;
-        } else {
-            // Fallback to old naming scheme
-            const layoutPrefix = layout === 'tiles' ? 'tiles' : 'standard';
-            return `moodle_files_${layoutPrefix}.zip`;
-        }
+        return courseName ? `${courseName}.zip` : `moodle_files_${layout}.zip`;
     }    /**
      * Check if a filename has a valid file extension
      * @param filename The filename to check
      * @returns True if the filename has a valid extension
      */
     private hasValidExtension(filename: string): boolean {
-        if (!filename.includes('.')) {
-            return false;
-        }
-
-        const parts = filename.split('.');
-        if (parts.length < 2) {
-            return false;
-        }
-
-        const extension = parts[parts.length - 1];
-        if (!extension) {
-            return false;
-        }
-
-        const lowerExt = extension.toLowerCase();
-
-        // Valid file extensions should be 1-5 characters and contain only letters/numbers
-        const isValidFormat = /^[a-z0-9]{1,5}$/i.test(lowerExt);
-
-        // Common file extensions that we recognize
-        const commonExtensions = [
-            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-            'txt', 'html', 'htm', 'css', 'js', 'json', 'xml',
-            'jpg', 'jpeg', 'png', 'gif', 'svg', 'bmp',
-            'mp3', 'mp4', 'avi', 'wav', 'mov',
-            'zip', 'rar', '7z', 'tar', 'gz',
-            'exe', 'msi', 'dmg', 'deb', 'rpm'
-        ];
-
-        return isValidFormat && commonExtensions.includes(lowerExt);
+        if (!filename.includes('.')) return false;
+        const extension = filename.split('.').pop()?.toLowerCase() || '';
+        return /^[a-z0-9]{1,5}$/.test(extension);
     }
 
     /**
@@ -370,8 +419,10 @@ class MoodleBackgroundService {
      */
     private sanitizeFolderName(folderName: string): string {
         return folderName
-            .replace(/[<>:"/\\|?*]/g, '_')
-            .trim();
+            .split('/')
+            .map(part => part.replace(/[<>:"\\|?*]/g, '_').trim())
+            .filter(Boolean)
+            .join('/');
     }
 
     /**
@@ -450,16 +501,16 @@ class MoodleBackgroundService {
         };
 
         const mainType = contentType?.split(';')[0]?.trim().toLowerCase() || '';
-        const extension = typeMap[mainType];
+        // Unknown types default to PDF — most common for course materials.
+        return typeMap[mainType] || 'pdf';
+    }
 
-        if (extension) {
-            Logger.info(`Mapped content-type '${mainType}' to extension '${extension}'`);
-            return extension;
-        } else {
-            // For unknown content types in an academic context, PDF is most likely
-            Logger.info(`Unknown content-type '${mainType}', defaulting to PDF`);
-            return 'pdf';
-        }
+    private getImageExtension(url: string, contentType: string | null): string {
+        const fromType = contentType?.split(';')[0]?.split('/')[1]?.toLowerCase();
+        if (fromType && /^[a-z0-9]{2,5}$/.test(fromType)) return fromType === 'svg+xml' ? 'svg' : fromType;
+        const path = new URL(url).pathname;
+        const ext = path.split('.').pop()?.toLowerCase();
+        return ext && /^[a-z0-9]{2,5}$/.test(ext) ? ext : 'bin';
     }
 
     /**
@@ -468,12 +519,9 @@ class MoodleBackgroundService {
      */
     private async sendMessageToPopup(message: any): Promise<void> {
         try {
-            // Send message to runtime (popup will receive it if open)
             await (globalThis as any).chrome.runtime.sendMessage(message);
-
-            Logger.info('Message sent to popup:', message);
-        } catch (error) {
-            Logger.warn('Could not send message to popup (popup may be closed):', error);
+        } catch {
+            // Popup closed — nothing to do
         }
     }
 
@@ -488,7 +536,6 @@ class MoodleBackgroundService {
             return originalPath;
         }
 
-        // Extract directory, filename and extension
         const lastSlashIndex = originalPath.lastIndexOf('/');
         const directory = lastSlashIndex >= 0 ? originalPath.substring(0, lastSlashIndex + 1) : '';
         const filename = lastSlashIndex >= 0 ? originalPath.substring(lastSlashIndex + 1) : originalPath;
@@ -497,7 +544,6 @@ class MoodleBackgroundService {
         const nameWithoutExt = lastDotIndex >= 0 ? filename.substring(0, lastDotIndex) : filename;
         const extension = lastDotIndex >= 0 ? filename.substring(lastDotIndex) : '';
 
-        // Try adding numbers until we find a unique path
         let counter = 1;
         let uniquePath: string;
         do {
@@ -505,7 +551,6 @@ class MoodleBackgroundService {
             counter++;
         } while (usedPaths.has(uniquePath));
 
-        Logger.info(`Duplicate filename detected, renamed: ${originalPath} -> ${uniquePath}`);
         return uniquePath;
     }
 }

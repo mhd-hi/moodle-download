@@ -1,4 +1,4 @@
-import { DiscoveredFile, ScanResultMessage, ScanProgressMessage, DownloadZipMessage, DownloadCompleteMessage } from './types';
+import { DiscoveredFile, ScanResultMessage, ScanProgressMessage, DownloadZipMessage, DownloadCompleteMessage, PersistedScan, PersistedDownload } from './types';
 import { Logger } from './utils';
 
 /**
@@ -9,8 +9,28 @@ class MoodlePopup {
     private files: DiscoveredFile[] = [];
     private layout: 'standard' | 'tiles' = 'standard';
     private courseName: string | undefined;
+    private pendingDownloadId: string | null = null;
+    private pendingKeys: string[] = [];
+    private downloadedUrls = new Set<string>();
+    private remember = true;
+    private tabUrl = '';
+    private waitingForScan = false;
+    private lastResultNonce: string | null = null;
+    private static readonly HISTORY_KEY = 'md_downloaded_urls';
+    private static readonly SETTING_KEY = 'md_remember_downloaded';
+    private static readonly SCAN_KEY = 'md_scan';
+    private static readonly DOWNLOAD_KEY = 'md_download';
+    private static readonly DONE_TTL = 5 * 60 * 1000;
+    private static readonly SCANNING_TTL = 60 * 1000;
+    private static readonly DOWNLOAD_TTL = 2 * 60 * 1000;
+
+    /** History key: plain URL, or url#sha for generated files so edits count as new. */
+    private static historyKeyOf(file: { url: string; sha?: string | undefined }): string {
+        return file.sha ? `${file.url}#${file.sha}` : file.url;
+    }
     // DOM elements
     private loadingEl!: HTMLElement;
+    private scanStartEl!: HTMLElement;
     private errorEl!: HTMLElement;
     private errorMessageEl!: HTMLElement;
     private contentEl!: HTMLElement;
@@ -19,10 +39,14 @@ class MoodlePopup {
     private totalCountEl!: HTMLElement;
     private filesContainerEl!: HTMLElement;
     private downloadBtnEl!: HTMLButtonElement;
+    private cancelBtnEl!: HTMLButtonElement;
     private downloadTextEl!: HTMLElement; private selectAllBtnEl!: HTMLButtonElement;
     private selectNoneBtnEl!: HTMLButtonElement;
+    private forgetBtnEl!: HTMLButtonElement;
+    private rememberToggleEl!: HTMLInputElement;
     private foundCountEl!: HTMLElement;
     private scanProgressEl!: HTMLElement;
+    private scanPageBtnEl!: HTMLButtonElement;
 
     constructor() {
         this.init();
@@ -35,6 +59,7 @@ class MoodlePopup {
 
         // Get DOM elements
         this.loadingEl = document.getElementById('loading')!;
+        this.scanStartEl = document.getElementById('scan-start')!;
         this.errorEl = document.getElementById('error')!;
         this.errorMessageEl = document.getElementById('error-message')!;
         this.contentEl = document.getElementById('content')!;
@@ -43,11 +68,15 @@ class MoodlePopup {
         this.totalCountEl = document.getElementById('total-count')!;
         this.filesContainerEl = document.getElementById('files-container')!;
         this.downloadBtnEl = document.getElementById('download-btn') as HTMLButtonElement;
+        this.cancelBtnEl = document.getElementById('cancel-btn') as HTMLButtonElement;
         this.downloadTextEl = document.getElementById('download-text')!;
         this.selectAllBtnEl = document.getElementById('select-all') as HTMLButtonElement;
         this.selectNoneBtnEl = document.getElementById('select-none') as HTMLButtonElement;
+        this.forgetBtnEl = document.getElementById('forget-history') as HTMLButtonElement;
+        this.rememberToggleEl = document.getElementById('remember-toggle') as HTMLInputElement;
         this.foundCountEl = document.getElementById('found-count')!;
         this.scanProgressEl = document.getElementById('scan-progress')!;
+        this.scanPageBtnEl = document.getElementById('scan-page-btn') as HTMLButtonElement;
 
         // Set up event listeners
         this.setupEventListeners();
@@ -57,8 +86,44 @@ class MoodlePopup {
             this.handleBackgroundMessage(message);
         });
 
-        // Start scanning the current tab
-        await this.scanCurrentTab();
+        await this.restoreInitialState();
+    }
+
+    private async restoreInitialState(): Promise<void> {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tab = tabs[0];
+        if (!tab?.url || !/^https?:\/\//i.test(tab.url)) {
+            this.showError('Please navigate to a Moodle course page first');
+            return;
+        }
+
+        this.tabUrl = tab.url;
+        await this.loadState();
+        const got = await chrome.storage.local.get([MoodlePopup.SCAN_KEY, MoodlePopup.DOWNLOAD_KEY]);
+        const storedScan = got[MoodlePopup.SCAN_KEY] as PersistedScan | undefined;
+
+        if (storedScan?.pageUrl === tab.url && Date.now() - storedScan.at < MoodlePopup.DONE_TTL) {
+            if (storedScan.status === 'scanning' && Date.now() - storedScan.at < MoodlePopup.SCANNING_TTL) {
+                this.showWaiting(storedScan.foundCount);
+                return;
+            }
+            if (storedScan.status === 'done') {
+                await this.handleScanResult({
+                    type: 'SCAN_RESULT', files: storedScan.files,
+                    layout: storedScan.layout, courseName: storedScan.courseName,
+                    pageUrl: storedScan.pageUrl
+                });
+                this.restoreDownloadUI(got[MoodlePopup.DOWNLOAD_KEY] as PersistedDownload | undefined);
+                return;
+            }
+        }
+
+        this.showScanStart();
+    }
+
+    private showScanStart(): void {
+        this.hideAll();
+        this.scanStartEl.style.display = 'flex';
     }
 
     /**
@@ -66,19 +131,41 @@ class MoodlePopup {
      */
     private setupEventListeners(): void {
         this.downloadBtnEl.addEventListener('click', () => this.handleDownload());
+        this.cancelBtnEl.addEventListener('click', () => this.handleCancel());
+        this.scanPageBtnEl.addEventListener('click', () => this.scanCurrentTab());
         this.selectAllBtnEl.addEventListener('click', () => this.selectAll());
         this.selectNoneBtnEl.addEventListener('click', () => this.selectNone());
+        this.forgetBtnEl.addEventListener('click', () => this.forgetHistory());
+        this.rememberToggleEl.addEventListener('change', () => this.handleRememberToggle());
+    }
+
+    private async loadState(): Promise<void> {
+        try {
+            const got = await chrome.storage.local.get([MoodlePopup.HISTORY_KEY, MoodlePopup.SETTING_KEY]);
+            const urls = got[MoodlePopup.HISTORY_KEY];
+            this.downloadedUrls = new Set(Array.isArray(urls) ? urls : []);
+            this.remember = got[MoodlePopup.SETTING_KEY] !== false;
+        } catch {
+            // ponytail: in-memory fallback, history just won't persist
+        }
+        if (this.rememberToggleEl) this.rememberToggleEl.checked = this.remember;
+        this.updateForgetVisibility();
+    }
+
+    private async saveHistory(): Promise<void> {
+        try {
+            await chrome.storage.local.set({ [MoodlePopup.HISTORY_KEY]: [...this.downloadedUrls] });
+        } catch { /* ignore */ }
+        this.updateForgetVisibility();
+    }
+
+    private updateForgetVisibility(): void {
+        if (this.forgetBtnEl) this.forgetBtnEl.style.display = this.downloadedUrls.size > 0 ? '' : 'none';
     }    /**
      * Scan the current tab for downloadable files
      */
     private async scanCurrentTab(): Promise<void> {
         try {
-            Logger.info('Scanning current tab for files');
-
-            // Hide progress initially 
-            this.scanProgressEl.style.display = 'none';
-
-            // Get current tab
             const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
             if (!tabs[0]) {
                 this.showError('No active tab found');
@@ -87,41 +174,147 @@ class MoodlePopup {
 
             const tab = tabs[0];
 
-            // Check if tab is a supported Moodle page
-            if (!tab.url?.includes('ena.etsmtl.ca')) {
-                this.showError('Please navigate to a Moodle course page (ena.etsmtl.ca) first');
+            // The content script is available on Moodle installations worldwide.
+            if (!tab.url || !/^https?:\/\//i.test(tab.url)) {
+                this.showError('Please navigate to a Moodle course page first');
                 return;
             }
+            this.tabUrl = tab.url;
 
-            // Send scan message to content script
-            const response = await chrome.tabs.sendMessage(tab.id!, { type: 'SCAN_PAGE' });
+            await this.loadState();
+            const got = await chrome.storage.local.get([MoodlePopup.SCAN_KEY, MoodlePopup.DOWNLOAD_KEY]);
+            const storedScan = got[MoodlePopup.SCAN_KEY] as PersistedScan | undefined;
 
-            if (response && response.type === 'SCAN_RESULT') {
-                this.handleScanResult(response as ScanResultMessage);
-            } else {
-                this.showError('Failed to scan page. Please refresh and try again.');
+            // A scan for this page already finished — show it instantly, then
+            // refresh silently so the list stays current.
+            if (storedScan?.pageUrl === tab.url && Date.now() - storedScan.at < MoodlePopup.DONE_TTL) {
+                if (storedScan.status === 'scanning' && Date.now() - storedScan.at < MoodlePopup.SCANNING_TTL) {
+                    this.showWaiting(storedScan.foundCount);
+                    return; // Scan still running in the page — don't restart it.
+                }
+                if (storedScan.status === 'done') {
+                    await this.handleScanResult({
+                        type: 'SCAN_RESULT',
+                        files: storedScan.files,
+                        layout: storedScan.layout,
+                        courseName: storedScan.courseName,
+                        pageUrl: storedScan.pageUrl
+                    });
+                    this.restoreDownloadUI(got[MoodlePopup.DOWNLOAD_KEY] as PersistedDownload | undefined);
+                    await this.requestFreshScan(tab.id!, true); // Silent refresh, keeps selection.
+                    return;
+                }
             }
 
+            this.restoreDownloadUI(got[MoodlePopup.DOWNLOAD_KEY] as PersistedDownload | undefined);
+            await this.requestFreshScan(tab.id!);
         } catch (error) {
             Logger.error('Error scanning tab:', error);
-            this.showError('Failed to scan page. Make sure you\'re on a Moodle course page. Please refresh the page.');
+            this.showError('Failed to scan page. Make sure you\'re on a Moodle course page and try again.');
+        }
+    }
+
+    private async requestFreshScan(tabId: number, preserveSelection = false): Promise<void> {
+        const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        this.waitingForScan = true;
+        if (this.files.length === 0) {
+            this.hideAll();
+            this.loadingEl.style.display = 'flex';
+            this.scanProgressEl.style.display = 'none';
+        }
+
+        try {
+            const response = await this.sendScanRequest(tabId, nonce);
+
+            if (response && response.type === 'SCAN_RESULT') {
+                await this.handleScanResult(response as ScanResultMessage, { preserveSelection });
+            } else if (this.files.length === 0) {
+                this.waitingForScan = false;
+                this.showError('Failed to scan page. Please refresh and try again.');
+            } else {
+                this.waitingForScan = false;
+            }
+        } catch (error) {
+            Logger.error('Error scanning tab:', error);
+            this.waitingForScan = false;
+            if (this.files.length === 0) {
+                this.showError('Failed to scan page. Please refresh the Moodle page and try again.');
+            }
+        }
+    }
+
+    /** Send SCAN_PAGE, injecting the content script first if the tab predates it. */
+    private async sendScanRequest(tabId: number, nonce: string): Promise<any> {
+        try {
+            return await chrome.tabs.sendMessage(tabId, { type: 'SCAN_PAGE', nonce });
+        } catch {
+            await chrome.scripting.executeScript({ target: { tabId }, files: ['contentScript.js'] });
+            return await chrome.tabs.sendMessage(tabId, { type: 'SCAN_PAGE', nonce });
         }
     }
 
     /**
      * Handle scan result from content script
      */
-    private handleScanResult(result: ScanResultMessage): void {
+    private async handleScanResult(result: ScanResultMessage, opts?: { preserveSelection?: boolean }): Promise<void> {
+        if (result.nonce && result.nonce === this.lastResultNonce) return; // Duplicate delivery
+        if (result.nonce) this.lastResultNonce = result.nonce;
+        this.waitingForScan = false;
+
+        const prevSelected = new Map(this.files.map(f => [MoodlePopup.historyKeyOf(f), f.selected]));
         this.files = result.files;
         this.layout = result.layout;
         this.courseName = result.courseName;
 
-        Logger.info(`Found ${this.files.length} files in ${this.layout} layout`);
+        await this.loadState();
+        if (this.remember) {
+            this.files.forEach(file => {
+                if (this.downloadedUrls.has(MoodlePopup.historyKeyOf(file))) {
+                    file.alreadyDownloaded = true;
+                    if (!file.disabled) file.selected = false;
+                }
+            });
+        }
+        if (opts?.preserveSelection) {
+            this.files.forEach(file => {
+                const key = MoodlePopup.historyKeyOf(file);
+                if (!file.disabled && prevSelected.has(key)) {
+                    file.selected = prevSelected.get(key)!;
+                }
+            });
+        }
 
         if (this.files.length === 0) {
             this.showNoFiles();
         } else {
             this.showFiles();
+        }
+    }
+
+    /** Scan still running from before the popup closed — wait for it, don't restart. */
+    private showWaiting(foundCount: number): void {
+        this.waitingForScan = true;
+        this.hideAll();
+        this.loadingEl.style.display = 'flex';
+        this.scanProgressEl.style.display = 'block';
+        this.foundCountEl.textContent = foundCount.toString();
+    }
+
+    private restoreDownloadUI(dl: PersistedDownload | undefined): void {
+        if (!dl || Date.now() - dl.at > MoodlePopup.DOWNLOAD_TTL) return;
+
+        if (dl.status === 'downloading') {
+            this.downloadBtnEl.disabled = true;
+            this.downloadBtnEl.className = 'download-btn downloading';
+            this.downloadTextEl.textContent = 'Creating ZIP...';
+            this.cancelBtnEl.style.display = '';
+        } else if (this.files.length > 0) {
+            this.downloadTextEl.textContent = dl.success
+                ? `ZIP Downloaded! (${dl.downloadedCount}/${dl.totalCount} files)`
+                : 'Download Failed - Try Again';
+            if (dl.errors.length > 0) {
+                this.showDownloadErrors(dl.errors, dl.downloadedCount, dl.totalCount);
+            }
         }
     }
 
@@ -132,7 +325,6 @@ class MoodlePopup {
         this.hideAll();
         this.contentEl.style.display = 'block';
 
-        this.updateCounts();
         this.renderFiles();
     }
     /**
@@ -141,22 +333,15 @@ class MoodlePopup {
     private renderFiles(): void {
         this.filesContainerEl.innerHTML = '';
 
-        if (this.layout === 'tiles') {
-            this.renderTilesLayout();
-        } else {
-            this.renderStandardLayout();
-        }
+        this.renderGroupedLayout();
 
         this.updateCounts();
     }
 
-    /**
-     * Render files in tiles layout (grouped by folders)
-     */
-    private renderTilesLayout(): void {
+    private renderGroupedLayout(): void {
         const groups = new Map<string, DiscoveredFile[]>();
 
-        // Group files by folder
+        // Group files by folder (tab) — flat grouping, nested paths stay as "Tab/Sub-tab"
         this.files.forEach(file => {
             const folder = file.folder || 'Other Files';
             if (!groups.has(folder)) {
@@ -165,21 +350,93 @@ class MoodlePopup {
             groups.get(folder)!.push(file);
         });
 
-        // Render each group
+        // Single ungrouped list: keep old flat rendering (no extra header)
+        if (groups.size === 1 && groups.has('Other Files') && this.layout === 'standard') {
+            this.renderStandardLayout();
+            return;
+        }
+
+        // Render each tab group with its own select checkbox (collapsed by default)
         groups.forEach((files, folderName) => {
             const groupEl = document.createElement('div');
-            groupEl.className = 'file-group';
+            groupEl.className = 'file-group collapsed';
 
-            const headerEl = document.createElement('div');
-            headerEl.className = 'folder-header';
-            headerEl.textContent = `📁 ${folderName} (${files.length} files)`;
-            groupEl.appendChild(headerEl);
+            groupEl.appendChild(this.createFolderHeader(files, folderName, groupEl));
 
+            const filesEl = document.createElement('div');
+            filesEl.className = 'folder-files';
             files.forEach(file => {
-                groupEl.appendChild(this.createFileItem(file));
+                filesEl.appendChild(this.createFileItem(file, () => this.refreshFolderHeaders()));
             });
+            groupEl.appendChild(filesEl);
 
             this.filesContainerEl.appendChild(groupEl);
+        });
+
+        this.refreshFolderHeaders();
+    }
+
+    private createFolderHeader(files: DiscoveredFile[], folderName: string, groupEl: HTMLElement): HTMLElement {
+        const headerEl = document.createElement('div');
+        headerEl.className = 'folder-header';
+        headerEl.dataset['folder'] = folderName;
+
+        const toggleEl = document.createElement('span');
+        toggleEl.className = 'folder-toggle';
+        toggleEl.textContent = '▸';
+
+        const checkboxEl = document.createElement('input');
+        checkboxEl.type = 'checkbox';
+        checkboxEl.className = 'folder-checkbox';
+
+        const enabled = files.filter(f => !f.disabled);
+        checkboxEl.disabled = enabled.length === 0;
+        checkboxEl.addEventListener('change', () => {
+            enabled.forEach(f => { f.selected = checkboxEl.checked; });
+            // Sync file checkboxes in this group without full re-render
+            groupEl.querySelectorAll<HTMLInputElement>('.file-checkbox').forEach(cb => {
+                if (!cb.disabled) cb.checked = checkboxEl.checked;
+            });
+            this.refreshFolderHeaders();
+            this.updateCounts();
+        });
+
+        const labelEl = document.createElement('span');
+        labelEl.className = 'folder-title';
+        labelEl.textContent = `📁 ${folderName}`;
+
+        const countEl = document.createElement('span');
+        countEl.className = 'folder-count';
+
+        headerEl.append(toggleEl, checkboxEl, labelEl, countEl);
+        headerEl.addEventListener('click', (e) => {
+            if ((e.target as HTMLElement) === checkboxEl) return;
+            const collapsed = groupEl.classList.toggle('collapsed');
+            toggleEl.textContent = collapsed ? '▸' : '▾';
+        });
+
+        return headerEl;
+    }
+
+    private refreshFolderHeaders(): void {
+        const groups = new Map<string, DiscoveredFile[]>();
+        this.files.forEach(file => {
+            const folder = file.folder || 'Other Files';
+            if (!groups.has(folder)) groups.set(folder, []);
+            groups.get(folder)!.push(file);
+        });
+
+        this.filesContainerEl.querySelectorAll<HTMLElement>('.folder-header').forEach(header => {
+            const folder = header.dataset['folder']!;
+            const files = groups.get(folder) || [];
+            const enabled = files.filter(f => !f.disabled);
+            const selected = enabled.filter(f => f.selected).length;
+            const checkbox = header.querySelector<HTMLInputElement>('.folder-checkbox')!;
+            const count = header.querySelector<HTMLElement>('.folder-count')!;
+
+            checkbox.checked = enabled.length > 0 && selected === enabled.length;
+            checkbox.indeterminate = selected > 0 && selected < enabled.length;
+            count.textContent = `${selected}/${enabled.length} selected`;
         });
     }
 
@@ -193,7 +450,7 @@ class MoodlePopup {
     }    /**
      * Create a file item element
      */
-    private createFileItem(file: DiscoveredFile): HTMLElement {
+    private createFileItem(file: DiscoveredFile, onChange?: () => void): HTMLElement {
         const itemEl = document.createElement('div');
         itemEl.className = file.disabled ? 'file-item disabled' : 'file-item';
 
@@ -205,6 +462,7 @@ class MoodlePopup {
         checkboxEl.addEventListener('change', () => {
             file.selected = checkboxEl.checked;
             this.updateCounts();
+            onChange?.();
         });
 
         const infoEl = document.createElement('div');
@@ -236,6 +494,12 @@ class MoodlePopup {
         }
 
         infoEl.appendChild(titleEl);
+        if (file.alreadyDownloaded) {
+            const doneEl = document.createElement('div');
+            doneEl.className = 'file-downloaded';
+            doneEl.textContent = '✓ already downloaded';
+            infoEl.appendChild(doneEl);
+        }
         infoEl.appendChild(urlEl);
 
         itemEl.appendChild(checkboxEl);
@@ -259,21 +523,57 @@ class MoodlePopup {
      * Select all enabled files
      */
     private selectAll(): void {
+        this.setAllSelected(true);
+    }
+
+    private selectNone(): void {
+        this.setAllSelected(false);
+    }
+
+    /** Bulk actions override the skip — turn it off so selection is explicit. */
+    private async setRemember(on: boolean): Promise<void> {
+        this.remember = on;
+        if (this.rememberToggleEl) this.rememberToggleEl.checked = on;
+        try {
+            await chrome.storage.local.set({ [MoodlePopup.SETTING_KEY]: on });
+        } catch { /* ignore */ }
+    }
+
+    private setAllSelected(selected: boolean): void {
+        if (this.remember) this.setRemember(false);
         this.files.forEach(file => {
             if (!file.disabled) {
-                file.selected = true;
+                file.selected = selected;
             }
         });
         this.renderFiles();
-    }    /**
-     * Deselect all files
-     */
-    private selectNone(): void {
-        this.files.forEach(file => {
-            if (!file.disabled) {
-                file.selected = false;
-            }
-        });
+    }
+
+    private async forgetHistory(): Promise<void> {
+        if (this.downloadedUrls.size === 0) return;
+        if (!confirm(`Forget ${this.downloadedUrls.size} remembered download(s)? All files will show as new again.`)) return;
+        this.downloadedUrls.clear();
+        await this.saveHistory();
+        await this.setRemember(false);
+        this.files.forEach(file => { file.alreadyDownloaded = false; });
+        this.renderFiles();
+    }
+
+    private async handleRememberToggle(): Promise<void> {
+        await this.setRemember(this.rememberToggleEl.checked);
+        if (!this.remember) {
+            this.files.forEach(file => {
+                file.alreadyDownloaded = false;
+                if (!file.disabled) file.selected = true;
+            });
+        } else {
+            this.files.forEach(file => {
+                if (this.downloadedUrls.has(MoodlePopup.historyKeyOf(file))) {
+                    file.alreadyDownloaded = true;
+                    if (!file.disabled) file.selected = false;
+                }
+            });
+        }
         this.renderFiles();
     }
 
@@ -294,20 +594,28 @@ class MoodlePopup {
             this.downloadBtnEl.disabled = true;
             this.downloadBtnEl.className = 'download-btn downloading';
             this.downloadTextEl.textContent = 'Creating ZIP...';
+            this.cancelBtnEl.style.display = '';
 
             Logger.info(`Starting download of ${selectedFiles.length} files`);
+
+            this.pendingKeys = selectedFiles.map(MoodlePopup.historyKeyOf);
+            this.pendingDownloadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
             // Convert to downloadable files format
             const downloadableFiles = selectedFiles.map(file => ({
                 url: file.url,
                 title: file.title,
                 folder: file.folder,
-                filename: this.generateFilename(file)
+                filename: file.originalFilename || file.title,
+                generatedContent: file.generatedContent,
+                images: file.images,
+                historyKey: MoodlePopup.historyKeyOf(file)
             }));            // Send download request to background
             const message: DownloadZipMessage = {
                 type: 'DOWNLOAD_ZIP',
                 files: downloadableFiles,
-                layout: this.layout
+                layout: this.layout,
+                downloadId: this.pendingDownloadId
             };
 
             if (this.courseName) {
@@ -316,20 +624,11 @@ class MoodlePopup {
 
             await chrome.runtime.sendMessage(message);
 
-            // Update UI to show completion
-            this.downloadTextEl.textContent = 'ZIP Downloaded!';
-
-            // Reset button after delay
-            setTimeout(() => {
-                this.downloadBtnEl.disabled = false;
-                this.downloadBtnEl.className = 'download-btn';
-                this.downloadTextEl.textContent = 'Download as ZIP';
-            }, 2000);
-
         } catch (error) {
             Logger.error('Error during download:', error);
             this.downloadBtnEl.disabled = false;
             this.downloadBtnEl.className = 'download-btn';
+            this.cancelBtnEl.style.display = 'none';
             this.downloadTextEl.textContent = 'Download Failed - Try Again';
 
             setTimeout(() => {
@@ -345,19 +644,6 @@ class MoodlePopup {
             this.scanProgressEl.style.display = 'block';
             this.foundCountEl.textContent = message.foundCount.toString();
         }
-    }
-
-    /**
-     * Generate filename for a file
-     */
-    private generateFilename(file: DiscoveredFile): string {
-        // Use the original filename from instancename (already processed in utils.ts)
-        let filename = file.originalFilename || file.title;
-
-        // Don't add extension here - let the background script handle it based on actual content
-        // The background script will determine the proper extension from content-type headers
-
-        return filename;
     }
 
     /**
@@ -382,6 +668,7 @@ class MoodlePopup {
      */
     private hideAll(): void {
         this.loadingEl.style.display = 'none';
+        this.scanStartEl.style.display = 'none';
         this.errorEl.style.display = 'none';
         this.contentEl.style.display = 'none';
         this.noFilesEl.style.display = 'none';
@@ -393,31 +680,56 @@ class MoodlePopup {
             this.handleDownloadComplete(message as DownloadCompleteMessage);
         } else if (message.type === 'SCAN_PROGRESS') {
             this.handleScanProgress(message as ScanProgressMessage);
+        } else if (message.type === 'SCAN_RESULT' && this.waitingForScan && message.pageUrl === this.tabUrl) {
+            // Scan that outlived the previous popup instance just finished.
+            this.handleScanResult(message as ScanResultMessage, { preserveSelection: this.files.length > 0 });
         }
-    }/**
+    }
+    private async handleCancel(): Promise<void> {
+        this.cancelBtnEl.style.display = 'none';
+        this.downloadTextEl.textContent = 'Cancelling...';
+        try {
+            await chrome.runtime.sendMessage({ type: 'CANCEL_DOWNLOAD', downloadId: this.pendingDownloadId });
+        } catch { /* background confirms via DOWNLOAD_COMPLETE */ }
+    }
+    /**
      * Handle download completion message from background
      */
-    private handleDownloadComplete(message: DownloadCompleteMessage): void {
-        Logger.info('Download complete:', message);
+    private async handleDownloadComplete(message: DownloadCompleteMessage): Promise<void> {
+        // Ignore completions from an older run (e.g. a slow cancel confirmation).
+        if (this.pendingDownloadId && message.downloadId && message.downloadId !== this.pendingDownloadId) return;
+        this.pendingDownloadId = null;
 
         // Reset download button
         this.downloadBtnEl.disabled = false;
         this.downloadBtnEl.className = 'download-btn';
+        this.cancelBtnEl.style.display = 'none';
 
-        if (message.success) {
-            if (message.zipTooBig) {
-                this.downloadTextEl.textContent = `Files Downloaded Individually! (${message.downloadedCount}/${message.totalCount} files)`;
-            } else {
-                this.downloadTextEl.textContent = `ZIP Downloaded! (${message.downloadedCount}/${message.totalCount} files)`;
-            }
+        if (message.cancelled) {
+            this.downloadTextEl.textContent = 'Download Cancelled';
+        } else if (message.success && this.remember && this.pendingKeys.length > 0) {
+            this.pendingKeys.forEach(key => this.downloadedUrls.add(key));
+            await this.saveHistory();
+            this.files.forEach(file => {
+                if (this.downloadedUrls.has(MoodlePopup.historyKeyOf(file))) {
+                    file.alreadyDownloaded = true;
+                    if (!file.disabled) file.selected = false;
+                }
+            });
+            this.renderFiles();
+        }
+        this.pendingKeys = [];
+
+        if (!message.cancelled && message.success) {
+            this.downloadTextEl.textContent = `ZIP Downloaded! (${message.downloadedCount}/${message.totalCount} files)`;
 
             // Show errors if any
             if (message.errors && message.errors.length > 0) {
-                this.showDownloadErrors(message.errors, message.downloadedCount, message.totalCount, message.zipTooBig);
+                this.showDownloadErrors(message.errors, message.downloadedCount, message.totalCount);
             }
-        } else {
+        } else if (!message.cancelled) {
             this.downloadTextEl.textContent = 'Download Failed - Try Again';
-            this.showDownloadErrors(message.errors || ['Unknown error occurred'], 0, message.totalCount, message.zipTooBig);
+            this.showDownloadErrors(message.errors || ['Unknown error occurred'], 0, message.totalCount);
         }
 
         // Reset button text after delay
@@ -427,7 +739,7 @@ class MoodlePopup {
     }    /**
      * Show download errors in the UI
      */
-    private showDownloadErrors(errors: string[], downloadedCount: number, _totalCount: number, zipTooBig?: boolean): void {
+    private showDownloadErrors(errors: string[], downloadedCount: number, _totalCount: number): void {
         // Create or update error display area
         let errorDisplayEl = document.getElementById('download-errors');
         if (!errorDisplayEl) {
@@ -446,10 +758,6 @@ class MoodlePopup {
         const errorCount = errors.length;
 
         let html = `<div class="error-summary">`;
-
-        if (zipTooBig) {
-            html += `<div class="info-message">ℹ️ ZIP was too large to create. Files were downloaded individually instead.</div>`;
-        }
 
         if (successCount > 0) {
             html += `<div class="success-info">✅ Successfully downloaded: ${successCount} files</div>`;

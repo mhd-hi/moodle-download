@@ -10,10 +10,13 @@
     },
     "permissions": [
         "downloads",
-        "activeTab"
+        "activeTab",
+        "storage",
+        "scripting"
     ],
     "host_permissions": [
-        "https://ena.etsmtl.ca/*"
+        "http://*/*",
+        "https://*/*"
     ],
     "background": {
         "service_worker": "background.js"
@@ -21,7 +24,8 @@
     "content_scripts": [
         {
             "matches": [
-                "https://ena.etsmtl.ca/*"
+                "http://*/*",
+                "https://*/*"
             ],
             "js": [
                 "contentScript.js"

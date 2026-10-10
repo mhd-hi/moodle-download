@@ -1,5 +1,5 @@
 import { DOMUtils, URLUtils, Logger } from './utils';
-import { ExtensionMessage, ScanResultMessage, DiscoveredFile } from './types';
+import { ActivityLink, ExtensionMessage, ScanMessage, ScanResultMessage, DiscoveredFile, TileSection } from './types';
 import { CONFIG } from './config';
 
 /**
@@ -7,6 +7,8 @@ import { CONFIG } from './config';
  * Scans the page for downloadable content when requested by popup
  */
 class MoodleContentScript {
+  private scanNonce: string | undefined;
+
   constructor() {
     this.init();
   }
@@ -35,8 +37,11 @@ class MoodleContentScript {
     try {
       switch (message.type) {
         case 'SCAN_PAGE':
+          this.scanNonce = (message as ScanMessage).nonce;
           const result = await this.scanPage();
           sendResponse(result);
+          // Broadcast too — background persists it so a reopened popup restores.
+          chrome.runtime.sendMessage(result).catch(() => { /* popup closed */ });
           break;
 
         default:
@@ -52,137 +57,136 @@ class MoodleContentScript {
   private sendProgress(foundCount: number): void {
     chrome.runtime.sendMessage({
       type: 'SCAN_PROGRESS',
-      foundCount: foundCount
-    });
+      foundCount: foundCount,
+      pageUrl: location.href,
+      nonce: this.scanNonce
+    }).catch(() => { /* popup closed */ });
   }
-  /**
-   * Add a file and send progress update with async delay
-   */
-  private async addFileWithProgressAsync(files: DiscoveredFile[], file: DiscoveredFile): Promise<void> {
-    files.push(file);
-    const count = files.length;
-    this.sendProgress(count);
-
-    // Add small delay to make progress visible (for fast but visible updates)
-    await new Promise(resolve => setTimeout(resolve, 25));
+  private addFile(files: DiscoveredFile[], activity: ActivityLink, folderName?: string): void {
+    if (!URLUtils.isValidMoodleURL(activity.url)) return;
+    files.push(this.createDiscoveredFile(activity, folderName));
+    this.sendProgress(files.length);
   }
 
   /**
    * Scan the current page for downloadable content
    */
   private async scanPage(): Promise<ScanResultMessage> {
-    Logger.info('Scanning page for downloadable content');
-
     const files: DiscoveredFile[] = [];
     let layout: 'standard' | 'tiles' = 'standard';
 
     try {
+      if (!URLUtils.isMoodleCoursePage()) return this.taggedResult({ type: 'SCAN_RESULT', files, layout });
+
       if (DOMUtils.isTilesLayout()) {
-        Logger.info('Detected tiles layout');
-        layout = 'tiles';        // First try the standard approach - looking in section elements
-        const sections = DOMUtils.findTileSections();
-        Logger.info(`Found ${sections.length} sections with activities from section elements`);
+        layout = 'tiles';
+        // First strategy that yields files wins — the rest are fallbacks.
+        const strategies: Array<() => TileSection[] | Promise<TileSection[]>> = [
+          () => DOMUtils.findTileSections(),
+          () => DOMUtils.loadTileSectionsContent(),
+          () => [{ title: 'Other Files', activities: DOMUtils.findAllActivityLinks() }],
+          () => [{ title: 'Other Files', activities: DOMUtils.findFilesInTilesContainer() }],
+          () => [{ title: 'Other Files', activities: DOMUtils.findLoadedSectionContent() }],
+        ];
 
-        for (const section of sections) {
-          Logger.info(`Section "${section.title}" has ${section.activities.length} activities`);
-          for (const activity of section.activities) {
-            if (URLUtils.isValidMoodleURL(activity.url)) {
-              const file = this.createDiscoveredFile(activity, section.title);
-              await this.addFileWithProgressAsync(files, file);
-            }
-          }
-        }// If no files found in sections, try alternative approaches
-        if (files.length === 0) {
-          Logger.info('No files found in section elements, trying dynamic loading...');          // Try to load tile content dynamically
-          const dynamicSections = await DOMUtils.loadTileSectionsContent();
-          Logger.info(`Found ${dynamicSections.length} sections with dynamic content`);
-
-          for (const section of dynamicSections) {
+        for (const run of strategies) {
+          for (const section of await run()) {
             for (const activity of section.activities) {
-              if (URLUtils.isValidMoodleURL(activity.url)) {
-                const file = this.createDiscoveredFile(activity, section.title);
-                await this.addFileWithProgressAsync(files, file);
-              }
+              this.addFile(files, activity, section.title === 'Other Files' ? activity.folder : section.title);
             }
           }
-
-          // If still no files after dynamic loading, try fallback approaches
-          if (files.length === 0) {
-            Logger.info('No files found after dynamic loading, trying fallback approaches...');            // Try looking for any downloadable links throughout the page
-            const allActivities = DOMUtils.findAllActivityLinks();
-            Logger.info(`Found ${allActivities.length} total activity links on page`);
-
-            for (const activity of allActivities) {
-              if (URLUtils.isValidMoodleURL(activity.url)) {
-                const file = this.createDiscoveredFile(activity);
-                await this.addFileWithProgressAsync(files, file);
-              }
-            }            // If still no files, try scanning the entire tiles container
-            if (files.length === 0) {
-              Logger.info('Still no files found, scanning entire tiles container...');
-              const tilesFiles = DOMUtils.findFilesInTilesContainer();
-              Logger.info(`Found ${tilesFiles.length} files in tiles container`);
-
-              for (const activity of tilesFiles) {
-                if (URLUtils.isValidMoodleURL(activity.url)) {
-                  const file = this.createDiscoveredFile(activity);
-                  await this.addFileWithProgressAsync(files, file);
-                }
-              }
-            }            // Try one more approach - look for loaded section content anywhere
-            if (files.length === 0) {
-              Logger.info('Trying to find loaded section content anywhere in DOM...');
-              const loadedContent = DOMUtils.findLoadedSectionContent();
-              Logger.info(`Found ${loadedContent.length} files in loaded section content`);
-
-              for (const activity of loadedContent) {
-                const file = this.createDiscoveredFile(activity);
-                await this.addFileWithProgressAsync(files, file);
-              }
-            }
-          }
+          if (files.length > 0) break;
         }
       } else {
-        Logger.info('Detected standard layout');
-        layout = 'standard';
-        const activities = DOMUtils.findStandardActivityLinks();
-
-        for (const activity of activities) {
-          if (URLUtils.isValidMoodleURL(activity.url)) {
-            const file = this.createDiscoveredFile(activity);
-            await this.addFileWithProgressAsync(files, file);
-          }
+        for (const activity of DOMUtils.findStandardActivityLinks()) {
+          this.addFile(files, activity, activity.folder);
         }
-      } Logger.info(`Found ${files.length} downloadable files`);
-
-      // Check file sizes and disable large files
-      await this.checkFileSizes(files);// Extract course name
-      const courseName = this.extractCourseName();
-
-      const result: ScanResultMessage = {
-        type: 'SCAN_RESULT',
-        files: files,
-        layout: layout
-      };
-
-      if (courseName) {
-        result.courseName = courseName;
       }
 
+      await this.checkFileSizes(files);
+      await this.addNotesFiles(files);
+      const courseName = this.extractCourseName();
+
+      const result = this.taggedResult({ type: 'SCAN_RESULT', files, layout });
+      if (courseName) result.courseName = courseName;
       return result;
 
     } catch (error) {
       Logger.error('Error scanning page:', error);
-      return {
+      return this.taggedResult({
         type: 'SCAN_RESULT',
         files: [],
         layout: layout
-      };
+      });
     }
+  }
+
+  private taggedResult(result: ScanResultMessage): ScanResultMessage {
+    result.pageUrl = location.href;
+    if (this.scanNonce) result.nonce = this.scanNonce;
+    return result;
+  }
+
+  /**
+   * One generated notes.md per folder: tab text plus an index of the
+   * folder's files, hashed so edits surface as new. The sha covers
+   * the body only — header metadata stays out of the hash.
+   */
+  private async addNotesFiles(files: DiscoveredFile[]): Promise<void> {
+    const notesByFolder = DOMUtils.extractNotesByFolder();
+    Logger.info(`Notes: text found in ${notesByFolder.size} folder(s)`);
+
+    const filesByFolder = new Map<string, DiscoveredFile[]>();
+    files.forEach(f => {
+      const key = f.folder || 'Other Files';
+      if (!filesByFolder.has(key)) filesByFolder.set(key, []);
+      filesByFolder.get(key)!.push(f);
+    });
+
+    for (const folder of new Set([...notesByFolder.keys(), ...filesByFolder.keys()])) {
+      const links = (filesByFolder.get(folder) || [])
+        .map(f => `- [${f.title}](${f.url})`).join('\n');
+      const note = notesByFolder.get(folder);
+      const body = [note?.markdown || '', links ? `## Files\n\n${links}` : '']
+        .filter(Boolean).join('\n\n');
+      if (body.replace(/\s+/g, ' ').trim().length < 20) continue;
+
+      const sha = await this.sha256Hex(body);
+      const name = folder.split('/').pop() || folder;
+      const content = `# ${name}\n\n> source: ${location.href}\n\n${body}\n`;
+      files.push({
+        id: `notes-${sha.slice(0, 16)}`,
+        url: `notes:${location.href}#${folder}`,
+        title: 'notes.md',
+        folder: this.fixTextEncoding(folder),
+        originalFilename: 'notes.md',
+        generatedContent: content,
+        images: note?.images || [],
+        sha,
+        selected: true,
+        size: new TextEncoder().encode(content).length,
+        disabled: false,
+      });
+      this.sendProgress(files.length);
+    }
+  }
+
+  private async sha256Hex(text: string): Promise<string> {
+    try {
+      const subtle = (globalThis as any).crypto?.subtle;
+      if (subtle) {
+        const digest = await subtle.digest('SHA-256', new TextEncoder().encode(text));
+        return Array.from(new Uint8Array(digest)).map(b => (b as number).toString(16).padStart(2, '0')).join('');
+      }
+    } catch { /* fall through to FNV-1a */ }
+    // ponytail: non-secure contexts lack crypto.subtle; FNV-1a still detects changes
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return `fnv1a-${h.toString(16).padStart(8, '0')}`;
   }  /**
    * Create a DiscoveredFile from an ActivityLink
    */
-  private createDiscoveredFile(activity: any, folderName?: string): DiscoveredFile {
+  private createDiscoveredFile(activity: ActivityLink, folderName?: string): DiscoveredFile {
     return {
       id: this.generateFileId(activity.url),
       url: activity.url,
@@ -190,8 +194,8 @@ class MoodleContentScript {
       folder: folderName ? this.fixTextEncoding(folderName) : folderName,
       originalFilename: activity.originalFilename,
       selected: true,
-      size: undefined, // Will be checked later
-      disabled: false // Will be set if file is too large
+      size: undefined,
+      disabled: false
     };
   }
 
@@ -205,53 +209,40 @@ class MoodleContentScript {
    * Check file sizes and mark large files as disabled
    */
   private async checkFileSizes(files: DiscoveredFile[]): Promise<void> {
-    Logger.info(`Checking sizes for ${files.length} files`);
-
-    // Check files in parallel but limit concurrent requests
     const BATCH_SIZE = 3;
     for (let i = 0; i < files.length; i += BATCH_SIZE) {
       const batch = files.slice(i, i + BATCH_SIZE);
       await Promise.allSettled(
         batch.map(async (file) => {
+          if (file.url.startsWith('notes:')) return; // Generated locally, size already known
           try {
             const downloadUrl = URLUtils.ensureRedirectParameter(file.url);
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
 
             const response = await fetch(downloadUrl, {
               method: 'HEAD',
               signal: controller.signal,
               redirect: 'follow',
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-              }
             });
             clearTimeout(timeoutId);
 
             if (response.ok) {
               const contentLength = response.headers.get('content-length');
               if (contentLength) {
-                const size = parseInt(contentLength);
-                file.size = size;
+                file.size = parseInt(contentLength);
 
-                if (size > CONFIG.maxFileSize) {
+                if (file.size > CONFIG.maxFileSize) {
                   file.disabled = true;
                   file.selected = false;
-                  Logger.info(`File ${file.title} is too large (${Math.round(size / 1024 / 1024)}MB) - disabled`);
-                } else {
-                  Logger.info(`File ${file.title} size: ${Math.round(size / 1024)}KB`);
                 }
               }
             }
-          } catch (error) {
-            Logger.warn(`Could not check size for ${file.title}:`, error);
-            // If we can't check the size, leave it enabled
+          } catch {
+            // Leave enabled when the size can't be checked
           }
         })
       );
-
-      // Small delay between batches
-      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
   /**
@@ -259,58 +250,30 @@ class MoodleContentScript {
    */
   private extractCourseName(): string | undefined {
     try {
-      // Try the specific selector first (note: this has a dynamic ID that might change)
-      const specificSelector = '#yui_3_17_2_1_1750056718147_146 > div.mr-auto > div > div';
-      const courseNameEl = document.querySelector(specificSelector); if (courseNameEl && courseNameEl.textContent) {
-        const courseName = this.fixTextEncoding(courseNameEl.textContent.trim());
-        if (courseName) {
-          Logger.info(`Found course name using specific selector: "${courseName}"`);
-          return this.sanitizeCourseName(courseName);
-        }
-      }
-
-      // Try a more general version of the specific selector (without the dynamic ID)
-      const generalSelectors = [
-        '[id*="yui"] > div.mr-auto > div > div', // Similar structure without exact ID
-        'div.mr-auto > div > div', // Even more general
+      const selectors = [
+        'div.mr-auto > div > div',
         '.mr-auto .course-title',
         '.mr-auto h1',
-        '.mr-auto [data-region="course-name"]'
-      ];
-
-      for (const selector of generalSelectors) {
-        const element = document.querySelector(selector); if (element && element.textContent) {
-          const courseName = this.fixTextEncoding(element.textContent.trim());
-          if (courseName && courseName !== 'Dashboard' && courseName !== 'Home') {
-            Logger.info(`Found course name using general selector "${selector}": "${courseName}"`);
-            return this.sanitizeCourseName(courseName);
-          }
-        }
-      }
-
-      // Fallback selectors for course name
-      const fallbackSelectors = [
-        'h1.h2', // Common course title selector
+        '.mr-auto [data-region="course-name"]',
+        'h1.h2',
         '.course-title',
         '.breadcrumb-item.active',
         '[data-region="course-name"]',
         'h1'
       ];
 
-      for (const selector of fallbackSelectors) {
-        const element = document.querySelector(selector); if (element && element.textContent) {
+      for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (element?.textContent) {
           const courseName = this.fixTextEncoding(element.textContent.trim());
           if (courseName && courseName !== 'Dashboard' && courseName !== 'Home') {
-            Logger.info(`Found course name using fallback selector "${selector}": "${courseName}"`);
             return this.sanitizeCourseName(courseName);
           }
         }
       }
 
-      Logger.info('Could not extract course name from DOM - will use default filename');
       return undefined;
-    } catch (error) {
-      Logger.warn('Error extracting course name:', error);
+    } catch {
       return undefined;
     }
   }
@@ -396,8 +359,7 @@ class MoodleContentScript {
       }
 
       return fixedText;
-    } catch (error) {
-      Logger.warn('Error fixing text encoding:', error);
+    } catch {
       return text; // Return original text if fixing fails
     }
   }
