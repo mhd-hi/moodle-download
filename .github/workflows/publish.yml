@@ -24,7 +24,7 @@ jobs:
       - run: npm run build
       - run: npm run zip
 
-      - uses: mnao305/chrome-extension-upload@v5
+      - uses: mnao305/chrome-extension-upload@4008e29e13c144d0f6725462cbd49b7c291b4928 # v5
         with:
           file-path: extension.zip
           extension-id: ${{ secrets.EXTENSION_ID }}
