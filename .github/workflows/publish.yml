@@ -25,16 +25,19 @@ jobs:
       - run: npm run zip
 
       - name: Authenticate with Google Cloud
+        id: google-auth
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
 
       - name: Upload extension
         env:
+          TOKEN: ${{ steps.google-auth.outputs.access_token }}
           EXTENSION_ID: ${{ secrets.EXTENSION_ID }}
           PUBLISHER_ID: ${{ secrets.PUBLISHER_ID }}
         run: |
-          TOKEN="$(gcloud auth print-access-token)"
           curl --fail-with-body -X POST \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/zip" \
@@ -43,10 +46,10 @@ jobs:
 
       - name: Publish extension
         env:
+          TOKEN: ${{ steps.google-auth.outputs.access_token }}
           EXTENSION_ID: ${{ secrets.EXTENSION_ID }}
           PUBLISHER_ID: ${{ secrets.PUBLISHER_ID }}
         run: |
-          TOKEN="$(gcloud auth print-access-token)"
           curl --fail-with-body -X POST \
             -H "Authorization: Bearer ${TOKEN}" \
             "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:publish"
