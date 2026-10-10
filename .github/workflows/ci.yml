@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Validate packaged extension
+        shell: bash
+        run: |
+          test -f dist/manifest.json
+          test -f dist/background.js
+          test -f dist/contentScript.js
+          test -f dist/popup.js
+          test -f dist/popup.html
+          node -e "const m=require('./dist/manifest.json'); if (m.manifest_version !== 3) process.exit(1); if (!/^\\d+(\\.\\d+){0,3}$/.test(m.version)) process.exit(1);"
