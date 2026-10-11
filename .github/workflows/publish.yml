@@ -21,6 +21,7 @@ jobs:
         shell: bash
         run: |
           node -e "const fs=require('fs'); const p='src/manifest.json'; const m=JSON.parse(fs.readFileSync(p)); m.version='1.0.${GITHUB_RUN_NUMBER}'; fs.writeFileSync(p, JSON.stringify(m, null, 4)+'\\n');"
+          sed -i "s/>dev</>${GITHUB_SHA:0:7}</" src/popup.html
       - run: npm run build
       - run: npm run zip
 

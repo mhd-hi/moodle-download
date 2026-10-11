@@ -33,6 +33,14 @@ body {
     color: #111827;
 }
 
+.commit-sha {
+    padding: 2px 6px;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    color: #64748b;
+    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .header h1 {
     margin: 0;
     font-size: 18px;

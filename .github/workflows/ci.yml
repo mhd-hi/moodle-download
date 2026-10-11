@@ -29,7 +29,9 @@ jobs:
         run: npm run type-check
 
       - name: Build extension
-        run: npm run build
+        run: |
+          sed -i "s/>dev</>${GITHUB_SHA:0:7}</" src/popup.html
+          npm run build
 
       - name: Validate packaged extension
         shell: bash
